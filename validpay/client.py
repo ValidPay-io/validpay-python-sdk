@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Iterable, List, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 from urllib.parse import quote
 
 import requests
@@ -178,11 +178,32 @@ class ValidPayClient:
             auth=False,
         )
 
-        if not isinstance(data, dict) or "encrypted_payload" not in data:
+        if not isinstance(data, dict):
             raise ValidPayError(
                 "invalid_response",
-                "API response missing encrypted_payload",
+                "API response missing intent body",
                 details=data,
+            )
+
+        # Blind Revocation (Patent H). Revoked intents return status="revoked"
+        # with encrypted_payload=null — refuse to decrypt anything and surface
+        # the revocation context to the caller.
+        if data.get("status") == "revoked" or not data.get("encrypted_payload"):
+            if data.get("status") == "revoked":
+                msg = f"Intent {retrieval_id} has been revoked"
+                if data.get("revocation_reason"):
+                    msg = f"{msg}: {data['revocation_reason']}"
+            else:
+                msg = f"Intent {retrieval_id} has been revoked — no payload available"
+            raise ValidPayError(
+                "intent_revoked",
+                msg,
+                details={
+                    "intent_id": data.get("intent_id"),
+                    "status": data.get("status"),
+                    "revoked_at": data.get("revoked_at"),
+                    "revocation_reason": data.get("revocation_reason"),
+                },
             )
 
         decrypted = decrypt(data["encrypted_payload"], key)
@@ -220,6 +241,85 @@ class ValidPayClient:
             status=data.get("status", ""),
             integrity_verified=integrity_verified,
         )
+
+    def revoke_intent(
+        self,
+        retrieval_id: str,
+        *,
+        reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Revoke a previously issued intent (e.g., stop-payment).
+
+        Only the issuer who created the intent can revoke it. Once revoked,
+        verifiers will see ``status='revoked'`` and the encrypted payload
+        will no longer be returned by the API.
+
+        Args:
+            retrieval_id: The ``vp_*`` identifier of the intent to revoke.
+            reason: Optional human-readable reason (max 500 chars).
+
+        Returns:
+            A dict with ``intent_id``, ``status``, and ``revoked_at``.
+        """
+        if not retrieval_id:
+            raise ValidPayError("invalid_argument", "retrieval_id is required")
+
+        data = self._request(
+            "PATCH",
+            f"/v1/intent/{quote(retrieval_id, safe='')}/revoke",
+            body={"reason": reason} if reason else {},
+            auth=True,
+        )
+        return data if isinstance(data, dict) else {}
+
+    def reinstate_intent(
+        self,
+        retrieval_id: str,
+        *,
+        reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Reinstate a previously revoked intent.
+
+        Only the issuer who created the intent can reinstate it.
+
+        Args:
+            retrieval_id: The ``vp_*`` identifier of the intent to reinstate.
+            reason: Optional human-readable reason (max 500 chars).
+
+        Returns:
+            A dict with ``intent_id`` and ``status``.
+        """
+        if not retrieval_id:
+            raise ValidPayError("invalid_argument", "retrieval_id is required")
+
+        data = self._request(
+            "PATCH",
+            f"/v1/intent/{quote(retrieval_id, safe='')}/reinstate",
+            body={"reason": reason} if reason else {},
+            auth=True,
+        )
+        return data if isinstance(data, dict) else {}
+
+    def get_revocation_history(self, retrieval_id: str) -> List[Dict[str, Any]]:
+        """Fetch the revocation audit trail for an intent.
+
+        Only the issuer who created the intent can view this. Each event has
+        ``id``, ``action`` (``"revoked"`` or ``"reinstated"``), ``reason``,
+        and ``performed_at``. Newest first.
+        """
+        if not retrieval_id:
+            raise ValidPayError("invalid_argument", "retrieval_id is required")
+
+        data = self._request(
+            "GET",
+            f"/v1/intent/{quote(retrieval_id, safe='')}/revocations",
+            auth=True,
+        )
+        if isinstance(data, dict):
+            events = data.get("events")
+            if isinstance(events, list):
+                return events
+        return []
 
     def _request(
         self,

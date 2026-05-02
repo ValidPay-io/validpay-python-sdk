@@ -385,6 +385,125 @@ def test_verify_intent_with_null_commitment_hash_passes_with_integrity_false():
     assert result.integrity_verified is False
 
 
+def test_verify_intent_revoked_raises_intent_revoked():
+    session = _FakeSession([
+        _FakeResponse(200, {
+            "intent_id": "vp_rev_1",
+            "encrypted_payload": None,
+            "issuer": "Acme",
+            "issuer_verified": True,
+            "registered_at": "2026-05-02T00:00:00.000Z",
+            "status": "revoked",
+            "revoked_at": "2026-05-02T12:00:00.000Z",
+            "revocation_reason": "Stop payment requested by account holder",
+            "commitment_hash": None,
+        }),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+    with pytest.raises(ValidPayError) as exc:
+        client.verify_intent(retrieval_id="vp_rev_1", key=generate_key())
+    assert exc.value.code == "intent_revoked"
+    assert "Stop payment" in exc.value.message
+    assert exc.value.details["status"] == "revoked"
+    assert exc.value.details["revoked_at"] == "2026-05-02T12:00:00.000Z"
+
+
+def test_revoke_intent_sends_patch_with_reason():
+    session = _FakeSession([
+        _FakeResponse(200, {
+            "intent_id": "vp_x",
+            "status": "revoked",
+            "revoked_at": "2026-05-02T13:00:00.000Z",
+        }),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+    result = client.revoke_intent("vp_x", reason="Account holder requested stop")
+    assert result["status"] == "revoked"
+    assert result["revoked_at"] == "2026-05-02T13:00:00.000Z"
+
+    call = session.calls[0]
+    assert call["method"] == "PATCH"
+    assert call["url"] == "https://api.example.test/v1/intent/vp_x/revoke"
+    assert call["headers"]["Authorization"] == "Bearer k"
+    sent = json.loads(call["data"])
+    assert sent == {"reason": "Account holder requested stop"}
+
+
+def test_revoke_intent_without_reason_sends_empty_body():
+    session = _FakeSession([
+        _FakeResponse(200, {"intent_id": "vp_x", "status": "revoked", "revoked_at": "2026-05-02T13:00:00.000Z"}),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+    client.revoke_intent("vp_x")
+    call = session.calls[0]
+    # Spec: when no reason is provided, send an empty JSON body `{}`.
+    assert json.loads(call["data"]) == {}
+    assert call["headers"]["Content-Type"] == "application/json"
+
+
+def test_revoke_intent_validates_retrieval_id():
+    client = ValidPayClient(api_key="k", session=_FakeSession([]))
+    with pytest.raises(ValidPayError):
+        client.revoke_intent("")
+
+
+def test_reinstate_intent_sends_patch():
+    session = _FakeSession([
+        _FakeResponse(200, {"intent_id": "vp_x", "status": "active"}),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+    result = client.reinstate_intent("vp_x", reason="False alarm")
+    assert result["status"] == "active"
+
+    call = session.calls[0]
+    assert call["method"] == "PATCH"
+    assert call["url"] == "https://api.example.test/v1/intent/vp_x/reinstate"
+    sent = json.loads(call["data"])
+    assert sent == {"reason": "False alarm"}
+
+
+def test_reinstate_intent_validates_retrieval_id():
+    client = ValidPayClient(api_key="k", session=_FakeSession([]))
+    with pytest.raises(ValidPayError):
+        client.reinstate_intent("")
+
+
+def test_revoke_intent_409_raises_already_revoked():
+    session = _FakeSession([_FakeResponse(409, {"error": "already_revoked"})])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+    with pytest.raises(ValidPayError) as exc:
+        client.revoke_intent("vp_x")
+    assert exc.value.code == "already_revoked"
+    assert exc.value.status == 409
+
+
+def test_get_revocation_history_returns_events_list():
+    session = _FakeSession([
+        _FakeResponse(200, {
+            "events": [
+                {"id": "u1", "action": "reinstated", "reason": "False alarm", "performed_at": "2026-05-02T14:00:00.000Z"},
+                {"id": "u2", "action": "revoked", "reason": None, "performed_at": "2026-05-02T13:00:00.000Z"},
+            ]
+        }),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+    events = client.get_revocation_history("vp_x")
+    assert len(events) == 2
+    assert events[0]["action"] == "reinstated"
+    assert events[1]["action"] == "revoked"
+
+    call = session.calls[0]
+    assert call["method"] == "GET"
+    assert call["url"] == "https://api.example.test/v1/intent/vp_x/revocations"
+    assert call["headers"]["Authorization"] == "Bearer k"
+
+
+def test_get_revocation_history_validates_retrieval_id():
+    client = ValidPayClient(api_key="k", session=_FakeSession([]))
+    with pytest.raises(ValidPayError):
+        client.get_revocation_history("")
+
+
 def test_network_error_wrapped_as_validpay_error():
     import requests
 
