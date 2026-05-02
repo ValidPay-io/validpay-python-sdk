@@ -1,0 +1,4 @@
+qrcode[pil]>=7.4
+pyzbar>=0.1.9
+Pillow>=10.0
+numpy>=1.24
