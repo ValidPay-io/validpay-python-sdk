@@ -7,10 +7,12 @@ import pytest
 
 from validpay import (
     ValidPayError,
+    combine_key_shares,
     compute_commitment_hash,
     decrypt,
     encrypt,
     generate_key,
+    split_key,
 )
 
 
@@ -133,3 +135,50 @@ def test_commitment_hash_is_64_char_hex():
 
 def test_commitment_hash_changes_with_input():
     assert compute_commitment_hash("a") != compute_commitment_hash("b")
+
+
+def test_split_key_produces_two_32_byte_shares():
+    key = generate_key()
+    a, b = split_key(key)
+    assert len(base64.b64decode(a)) == 32
+    assert len(base64.b64decode(b)) == 32
+
+
+def test_split_key_shares_are_different_from_original():
+    key = generate_key()
+    a, b = split_key(key)
+    assert a != key
+    assert b != key
+    assert a != b
+
+
+def test_combine_key_shares_recovers_original():
+    key = generate_key()
+    a, b = split_key(key)
+    assert combine_key_shares(a, b) == key
+    # Order doesn't matter — XOR is commutative.
+    assert combine_key_shares(b, a) == key
+
+
+def test_split_key_is_random():
+    key = generate_key()
+    a1, b1 = split_key(key)
+    a2, b2 = split_key(key)
+    assert a1 != a2
+    assert b1 != b2
+
+
+def test_combine_wrong_shares_produces_wrong_key():
+    key1 = generate_key()
+    key2 = generate_key()
+    a1, _b1 = split_key(key1)
+    _a2, b2 = split_key(key2)
+    assert combine_key_shares(a1, b2) != key1
+    assert combine_key_shares(a1, b2) != key2
+
+
+def test_combine_key_shares_rejects_wrong_length():
+    short = base64.b64encode(b"short").decode("ascii")
+    with pytest.raises(ValidPayError) as exc:
+        combine_key_shares(short, generate_key())
+    assert exc.value.code == "invalid_key"

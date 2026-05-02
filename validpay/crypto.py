@@ -27,6 +27,53 @@ def generate_key() -> str:
     return base64.b64encode(os.urandom(_KEY_BYTES)).decode("ascii")
 
 
+def split_key(key: str) -> tuple[str, str]:
+    """Split an AES-256 key into two shares using XOR (2-of-2 Shamir equivalent).
+
+    Returns ``(share_a, share_b)`` where ``share_a XOR share_b == key`` and
+    each share alone reveals zero information about the key (one-time-pad
+    secure). For a 2-of-2 threshold this is mathematically equivalent to
+    Shamir's polynomial scheme; no external library is needed.
+
+    Args:
+        key: Base64-encoded 32-byte AES key.
+
+    Returns:
+        Tuple ``(share_a, share_b)``, both as base64 strings.
+    """
+    key_bytes = _decode_key(key)
+    share_a_bytes = os.urandom(_KEY_BYTES)
+    share_b_bytes = bytes(a ^ b for a, b in zip(key_bytes, share_a_bytes))
+    return (
+        base64.b64encode(share_a_bytes).decode("ascii"),
+        base64.b64encode(share_b_bytes).decode("ascii"),
+    )
+
+
+def combine_key_shares(share_a: str, share_b: str) -> str:
+    """Reconstruct an AES-256 key from two XOR shares.
+
+    Args:
+        share_a: Base64-encoded 32-byte share (typically from the QR code).
+        share_b: Base64-encoded 32-byte share (typically from the API).
+
+    Returns:
+        The reconstructed key, base64-encoded.
+    """
+    try:
+        a_bytes = base64.b64decode(share_a, validate=True)
+        b_bytes = base64.b64decode(share_b, validate=True)
+    except (ValueError, base64.binascii.Error) as exc:
+        raise ValidPayError("invalid_key", "Key shares are not valid base64") from exc
+    if len(a_bytes) != _KEY_BYTES or len(b_bytes) != _KEY_BYTES:
+        raise ValidPayError(
+            "invalid_key",
+            f"Key shares must each be {_KEY_BYTES} bytes",
+        )
+    key_bytes = bytes(a ^ b for a, b in zip(a_bytes, b_bytes))
+    return base64.b64encode(key_bytes).decode("ascii")
+
+
 def compute_commitment_hash(plaintext: str) -> str:
     """SHA-256 commitment hash of the plaintext payload (Hybrid Commitment Scheme).
 

@@ -11,10 +11,12 @@ from validpay import (
     CreateIntentResult,
     ValidPayClient,
     ValidPayError,
+    combine_key_shares,
     compute_commitment_hash,
     decrypt,
     encrypt,
     generate_key,
+    split_key,
 )
 
 
@@ -502,6 +504,166 @@ def test_get_revocation_history_validates_retrieval_id():
     client = ValidPayClient(api_key="k", session=_FakeSession([]))
     with pytest.raises(ValidPayError):
         client.get_revocation_history("")
+
+
+def test_split_key_create_sends_fragment_b_and_returns_share_a():
+    session = _FakeSession([
+        _FakeResponse(201, {
+            "retrieval_id": "vp_sk_1",
+            "status": "active",
+            "split_key": True,
+        }),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+
+    payload = {"payee": "Alice", "amount": 1000}
+    result = client.create_split_key_intent(document_type="check", payload=payload)
+
+    assert isinstance(result, CreateIntentResult)
+    assert result.retrieval_id == "vp_sk_1"
+    # `result.key` is Share A — base64, 32 bytes when decoded.
+    assert len(base64.b64decode(result.key)) == 32
+
+    sent = json.loads(session.calls[0]["data"])
+    assert sent["split_key"] is True
+    assert sent["document_type"] == "check"
+    assert isinstance(sent["encrypted_payload"], str)
+    assert isinstance(sent["key_fragment_b"], str)
+    assert len(base64.b64decode(sent["key_fragment_b"])) == 32
+
+    # Critical: Share B (sent to the server) is NOT the same as Share A
+    # (returned to the caller). Neither alone reveals the full key.
+    assert sent["key_fragment_b"] != result.key
+
+
+def test_split_key_round_trip():
+    """End-to-end: create on the wire, then verify on the wire, decrypts back."""
+    payload = {"ssn": "555-01-0001", "name": "Bob"}
+
+    # Track calls so we can replay state across mocked requests.
+    captured_body: dict = {}
+
+    create_session = _FakeSession([
+        _FakeResponse(201, {"retrieval_id": "vp_sk_2", "status": "active", "split_key": True}),
+    ])
+    creator = ValidPayClient(api_key="k", base_url="https://api.example.test", session=create_session)
+    create_result = creator.create_split_key_intent(document_type="ssn_card", payload=payload)
+    captured_body = json.loads(create_session.calls[0]["data"])
+
+    # Now simulate the verifier side. The server stored fragment_b and the
+    # encrypted payload — replay both back through the verify call.
+    encrypted_payload = captured_body["encrypted_payload"]
+    fragment_b = captured_body["key_fragment_b"]
+
+    verify_session = _FakeSession([
+        _FakeResponse(200, {
+            "intent_id": "vp_sk_2",
+            "encrypted_payload": encrypted_payload,
+            "issuer": "Acme",
+            "issuer_verified": True,
+            "registered_at": "2026-05-02T00:00:00.000Z",
+            "status": "active",
+            "split_key": True,
+            "commitment_hash": captured_body["commitment_hash"],
+        }),
+        _FakeResponse(200, {"intent_id": "vp_sk_2", "fragment_b": fragment_b}),
+    ])
+    verifier = ValidPayClient(api_key="k", base_url="https://api.example.test", session=verify_session)
+    result = verifier.verify_split_key_intent(retrieval_id="vp_sk_2", share_a=create_result.key)
+
+    assert result.payload == payload
+    assert result.integrity_verified is True
+
+    # The fragment GET hit the right URL, no auth header.
+    fragment_call = verify_session.calls[1]
+    assert fragment_call["method"] == "GET"
+    assert fragment_call["url"] == "https://api.example.test/v1/intent/vp_sk_2/fragment"
+    assert "Authorization" not in fragment_call["headers"]
+
+
+def test_verify_intent_rejects_split_key_with_split_key_required():
+    real_key = generate_key()
+    blob = encrypt(json.dumps({"x": 1}), real_key)
+    session = _FakeSession([
+        _FakeResponse(200, {
+            "intent_id": "vp_sk_3",
+            "encrypted_payload": blob,
+            "issuer": "Acme",
+            "issuer_verified": True,
+            "registered_at": "2026-05-02T00:00:00.000Z",
+            "status": "active",
+            "split_key": True,
+        }),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+    with pytest.raises(ValidPayError) as exc:
+        client.verify_intent(retrieval_id="vp_sk_3", key=real_key)
+    assert exc.value.code == "split_key_required"
+
+
+def test_verify_split_key_intent_revoked_raises():
+    session = _FakeSession([
+        _FakeResponse(200, {
+            "intent_id": "vp_sk_4",
+            "encrypted_payload": None,
+            "issuer": "Acme",
+            "issuer_verified": True,
+            "registered_at": "2026-05-02T00:00:00.000Z",
+            "status": "revoked",
+            "revoked_at": "2026-05-02T12:00:00.000Z",
+            "revocation_reason": "Stop payment",
+            "split_key": True,
+        }),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+    a, _b = split_key(generate_key())
+    with pytest.raises(ValidPayError) as exc:
+        client.verify_split_key_intent(retrieval_id="vp_sk_4", share_a=a)
+    assert exc.value.code == "intent_revoked"
+
+
+def test_verify_split_key_intent_validates_arguments():
+    client = ValidPayClient(api_key="k", session=_FakeSession([]))
+    with pytest.raises(ValidPayError):
+        client.verify_split_key_intent(retrieval_id="", share_a="anything")
+    with pytest.raises(ValidPayError):
+        client.verify_split_key_intent(retrieval_id="vp_x", share_a="")
+
+
+def test_verify_split_key_intent_missing_fragment_raises():
+    real_key = generate_key()
+    blob = encrypt(json.dumps({"x": 1}), real_key)
+    session = _FakeSession([
+        _FakeResponse(200, {
+            "intent_id": "vp_sk_5",
+            "encrypted_payload": blob,
+            "issuer": "Acme",
+            "issuer_verified": True,
+            "registered_at": "2026-05-02T00:00:00.000Z",
+            "status": "active",
+            "split_key": True,
+        }),
+        _FakeResponse(200, {"error": "intent_revoked"}),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+    a, _b = split_key(generate_key())
+    with pytest.raises(ValidPayError) as exc:
+        client.verify_split_key_intent(retrieval_id="vp_sk_5", share_a=a)
+    assert exc.value.code == "intent_revoked"
+
+
+def test_split_key_xor_relationship_holds_via_combine_helper():
+    """Sanity check that the pieces the SDK sends actually XOR back to a key."""
+    session = _FakeSession([
+        _FakeResponse(201, {"retrieval_id": "vp_sk_6", "status": "active", "split_key": True}),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+    result = client.create_split_key_intent(document_type="check", payload={"amount": 1})
+
+    sent = json.loads(session.calls[0]["data"])
+    full_key = combine_key_shares(result.key, sent["key_fragment_b"])
+    # Decrypting with the recombined key should work — that's what the verifier does.
+    assert decrypt(sent["encrypted_payload"], full_key) == json.dumps({"amount": 1})
 
 
 def test_network_error_wrapped_as_validpay_error():
