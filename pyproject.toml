@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "validpay"
+version = "0.1.0"
+description = "Official ValidPay Python SDK — client-side AES-256-GCM encryption + ValidPay API client"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "ValidPay", email = "dev@validpay.io" }]
+requires-python = ">=3.9"
+keywords = [
+    "validpay",
+    "encryption",
+    "aes-256-gcm",
+    "document-verification",
+    "blind-escrow",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security :: Cryptography",
+]
+dependencies = [
+    "cryptography>=41.0",
+    "requests>=2.28",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/ValidPay-io/validpay-python-sdk"
+Repository = "https://github.com/ValidPay-io/validpay-python-sdk"
+Issues = "https://github.com/ValidPay-io/validpay-python-sdk/issues"
+
+[tool.setuptools.packages.find]
+include = ["validpay*"]
+exclude = ["tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
