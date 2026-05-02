@@ -653,6 +653,119 @@ class ValidPayClient:
             integrity_verified=integrity_verified,
         )
 
+    def create_bound_intent(
+        self,
+        document_type: str,
+        payload: dict,
+        binding_zone_image: bytes,
+        *,
+        binding_threshold: int = 10,
+        split_key: bool = False,
+        selective_disclosure: bool = False,
+        disclosure_policy: Optional[dict] = None,
+    ) -> CreateIntentResult:
+        """Create an intent with physical medium binding (Patent G).
+
+        Computes a perceptual hash of the binding zone image and includes
+        it as an encrypted field ``_binding_hash`` in the payload. The
+        ``_binding_threshold`` is also stored so the verifier knows the
+        issuer's tolerance setting.
+
+        This method supports combining with split-key and selective
+        disclosure features.
+
+        Args:
+            document_type: Short string identifying the document kind.
+            payload: Dict of field_name → value.
+            binding_zone_image: Raw bytes of the binding zone image (JPEG/PNG).
+            binding_threshold: Hamming distance threshold (default 10).
+            split_key: If True, use split-key verification (Patent C).
+            selective_disclosure: If True, use per-field encryption (Patent E).
+            disclosure_policy: Required if selective_disclosure is True.
+
+        Returns:
+            CreateIntentResult with retrieval_id and key.
+        """
+        from .binding import compute_binding_hash
+
+        if not document_type:
+            raise ValidPayError("invalid_argument", "document_type is required")
+        if not payload or not isinstance(payload, dict):
+            raise ValidPayError("invalid_argument", "payload must be a non-empty dict")
+        if not binding_zone_image:
+            raise ValidPayError("invalid_argument", "binding_zone_image is required")
+
+        binding_hash = compute_binding_hash(binding_zone_image)
+
+        bound_payload = dict(payload)
+        bound_payload["_binding_hash"] = binding_hash
+        bound_payload["_binding_threshold"] = binding_threshold
+
+        if selective_disclosure:
+            if not disclosure_policy:
+                raise ValidPayError(
+                    "invalid_argument",
+                    "disclosure_policy is required when selective_disclosure is True",
+                )
+            return self.create_selective_intent(
+                document_type=document_type,
+                payload=bound_payload,
+                disclosure_policy=disclosure_policy,
+                split_key=split_key,
+            )
+        elif split_key:
+            return self.create_split_key_intent(
+                document_type=document_type,
+                payload=bound_payload,
+            )
+        else:
+            return self.create_intent(
+                document_type=document_type,
+                payload=bound_payload,
+            )
+
+    @staticmethod
+    def verify_binding(
+        payload: dict,
+        binding_zone_image: bytes,
+    ) -> "BindingComparisonResult":
+        """Compare a freshly captured binding zone image against the stored hash.
+
+        Call this AFTER ``verify_intent`` / ``verify_split_key_intent`` /
+        ``verify_selective_intent`` has returned the decrypted payload.
+
+        Args:
+            payload: The decrypted payload dict (must contain ``_binding_hash``).
+            binding_zone_image: Raw bytes of the freshly captured binding zone.
+
+        Returns:
+            BindingComparisonResult with match status and Hamming distance.
+
+        Raises:
+            ValidPayError: If the payload doesn't contain binding metadata.
+        """
+        from .binding import compute_binding_hash, compare_binding_hashes
+
+        stored_hash = payload.get("_binding_hash")
+        if not stored_hash:
+            raise ValidPayError(
+                "no_binding",
+                "This intent does not contain physical medium binding data. "
+                "The _binding_hash field is missing from the payload.",
+            )
+
+        threshold = payload.get("_binding_threshold", 10)
+        if not isinstance(threshold, int):
+            threshold = int(threshold)
+
+        current_hash = compute_binding_hash(binding_zone_image)
+
+        return compare_binding_hashes(
+            stored_hash,
+            current_hash,
+            threshold=threshold,
+        )
+
     def revoke_intent(
         self,
         retrieval_id: str,

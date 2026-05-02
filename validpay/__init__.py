@@ -7,6 +7,11 @@ Public API:
     generate_key, encrypt, decrypt — low-level crypto helpers
 """
 
+from .binding import (
+    BindingComparisonResult,
+    compare_binding_hashes,
+    compute_binding_hash,
+)
 from .client import ValidPayClient
 from .crypto import (
     build_key_map,
@@ -36,6 +41,9 @@ __all__ = [
     "encrypt_fields",
     "build_key_map",
     "decrypt_fields",
+    "compute_binding_hash",
+    "compare_binding_hashes",
+    "BindingComparisonResult",
 ]
 
 __version__ = "0.1.0"
