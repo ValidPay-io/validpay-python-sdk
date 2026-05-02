@@ -7,12 +7,15 @@ from urllib.parse import quote
 import requests
 
 from .crypto import (
+    build_key_map,
     combine_key_shares,
     compute_commitment_hash,
     decrypt,
+    decrypt_fields,
     encrypt,
+    encrypt_fields,
     generate_key,
-    split_key,
+    split_key as split_key_fn,
 )
 from .errors import ValidPayError
 from .types import CreateIntentResult, VerifyIntentResult
@@ -213,6 +216,15 @@ class ValidPayClient:
                 },
             )
 
+        # Selective Field Disclosure (Patent E). Per-field encryption uses a
+        # different envelope shape; verify_intent can't decrypt it.
+        if data.get("selective_disclosure"):
+            raise ValidPayError(
+                "selective_disclosure_required",
+                "This intent uses selective field disclosure. "
+                "Use verify_selective_intent(retrieval_id, key, role) instead of verify_intent().",
+            )
+
         # Split-Key Verification (Patent C). The caller passed a single key,
         # but this intent was issued with a key split into two shares —
         # verify_intent doesn't have enough information to reconstruct.
@@ -286,7 +298,7 @@ class ValidPayClient:
             raise ValidPayError("invalid_argument", "document_type is required")
 
         full_key = generate_key()
-        share_a, share_b = split_key(full_key)
+        share_a, share_b = split_key_fn(full_key)
 
         plaintext = json.dumps(payload)
         commitment_hash = compute_commitment_hash(plaintext)
@@ -408,6 +420,228 @@ class ValidPayClient:
                 "invalid_payload",
                 "Decrypted payload is not valid JSON",
             ) from exc
+
+        return VerifyIntentResult(
+            intent_id=data.get("intent_id", ""),
+            payload=payload,
+            issuer=data.get("issuer", ""),
+            issuer_verified=bool(data.get("issuer_verified", False)),
+            registered_at=data.get("registered_at", ""),
+            status=data.get("status", ""),
+            integrity_verified=integrity_verified,
+        )
+
+    def create_selective_intent(
+        self,
+        document_type: str,
+        payload: dict,
+        disclosure_policy: dict,
+        *,
+        split_key: bool = False,
+    ) -> CreateIntentResult:
+        """Create an intent with per-field encryption and a disclosure policy (Patent E).
+
+        Each field is encrypted with its own AES-256 key. The disclosure_policy
+        maps role names to lists of field names that role can access. A "full"
+        role is automatically added with access to all fields.
+
+        The field key map is encrypted with the master key (or Share A for
+        split-key intents) and stored on the server. The server cannot decrypt
+        it — only the QR holder can.
+
+        Args:
+            document_type: Short string identifying the document kind.
+            payload: Dict of field_name → value.
+            disclosure_policy: { role_name: [field_name, ...] }.
+            split_key: If True, use split-key verification (Patent C).
+
+        Returns:
+            CreateIntentResult with retrieval_id and key (or Share A if split_key).
+        """
+        if not document_type:
+            raise ValidPayError("invalid_argument", "document_type is required")
+        if not payload or not isinstance(payload, dict):
+            raise ValidPayError("invalid_argument", "payload must be a non-empty dict")
+        if not disclosure_policy or not isinstance(disclosure_policy, dict):
+            raise ValidPayError("invalid_argument", "disclosure_policy must be a non-empty dict")
+
+        for role, fields in disclosure_policy.items():
+            if not isinstance(fields, list):
+                raise ValidPayError(
+                    "invalid_argument",
+                    f"disclosure_policy['{role}'] must be a list",
+                )
+            for f in fields:
+                if f not in payload:
+                    raise ValidPayError(
+                        "invalid_argument",
+                        f"Field '{f}' in role '{role}' not found in payload",
+                    )
+
+        master_key = generate_key()
+        encrypted_fields, field_keys = encrypt_fields(payload)
+        key_map = build_key_map(field_keys, disclosure_policy)
+        encrypted_key_map = encrypt(json.dumps(key_map), master_key)
+
+        full_plaintext = json.dumps(payload)
+        commitment_hash = compute_commitment_hash(full_plaintext)
+        envelope = json.dumps(encrypted_fields)
+
+        qr_key = master_key
+        key_fragment_b: Optional[str] = None
+        if split_key:
+            share_a, share_b = split_key_fn(master_key)
+            qr_key = share_a
+            key_fragment_b = share_b
+
+        body: Dict[str, Any] = {
+            "document_type": document_type,
+            "encrypted_payload": envelope,
+            "commitment_hash": commitment_hash,
+            "selective_disclosure": True,
+            "disclosure_policy": json.dumps(disclosure_policy),
+            "encrypted_key_map": encrypted_key_map,
+            "split_key": split_key,
+        }
+        if key_fragment_b is not None:
+            body["key_fragment_b"] = key_fragment_b
+
+        data = self._request("POST", "/v1/intent", body=body, auth=True)
+
+        retrieval_id = data.get("retrieval_id") if isinstance(data, dict) else None
+        if not retrieval_id:
+            raise ValidPayError(
+                "invalid_response",
+                "API response missing retrieval_id",
+                details=data,
+            )
+
+        return CreateIntentResult(retrieval_id=retrieval_id, key=qr_key)
+
+    def verify_selective_intent(
+        self,
+        retrieval_id: str,
+        key: str,
+        role: str = "full",
+    ) -> VerifyIntentResult:
+        """Verify a selective-disclosure intent, decrypting only fields for the given role.
+
+        Args:
+            retrieval_id: The vp_* identifier.
+            key: The master key (or Share A for split-key intents) from the QR code.
+            role: The verifier's role. "full" decrypts everything. Other roles see
+                only their authorized fields; unauthorized fields are "[REDACTED]".
+
+        Returns:
+            VerifyIntentResult with the (possibly partial) payload.
+        """
+        if not retrieval_id:
+            raise ValidPayError("invalid_argument", "retrieval_id is required")
+        if not key:
+            raise ValidPayError("invalid_argument", "key is required")
+
+        data = self._request(
+            "GET",
+            f"/v1/intent/{quote(retrieval_id, safe='')}",
+            auth=False,
+        )
+        if not isinstance(data, dict):
+            raise ValidPayError(
+                "invalid_response",
+                "API response missing intent body",
+                details=data,
+            )
+
+        if data.get("status") == "revoked" or not data.get("encrypted_payload"):
+            msg = f"Intent {retrieval_id} has been revoked"
+            if data.get("revocation_reason"):
+                msg = f"{msg}: {data['revocation_reason']}"
+            raise ValidPayError(
+                "intent_revoked",
+                msg,
+                details={
+                    "intent_id": data.get("intent_id"),
+                    "status": data.get("status"),
+                    "revoked_at": data.get("revoked_at"),
+                    "revocation_reason": data.get("revocation_reason"),
+                },
+            )
+
+        master_key = key
+        if data.get("split_key"):
+            fragment_data = self._request(
+                "GET",
+                f"/v1/intent/{quote(retrieval_id, safe='')}/fragment",
+                auth=False,
+            )
+            if isinstance(fragment_data, dict) and fragment_data.get("error"):
+                raise ValidPayError(
+                    str(fragment_data["error"]),
+                    f"Fragment retrieval failed: {fragment_data['error']}",
+                    details=fragment_data,
+                )
+            share_b = (
+                fragment_data.get("fragment_b")
+                if isinstance(fragment_data, dict)
+                else None
+            )
+            if not share_b:
+                raise ValidPayError(
+                    "missing_fragment",
+                    "Server did not return key fragment",
+                    details=fragment_data,
+                )
+            master_key = combine_key_shares(key, share_b)
+
+        encrypted_key_map = data.get("encrypted_key_map")
+        if not encrypted_key_map:
+            raise ValidPayError(
+                "invalid_response",
+                "Selective disclosure intent missing encrypted_key_map",
+            )
+
+        key_map_json = decrypt(encrypted_key_map, master_key)
+        try:
+            key_map = json.loads(key_map_json)
+        except json.JSONDecodeError as exc:
+            raise ValidPayError(
+                "invalid_payload",
+                "Decrypted key map is not valid JSON",
+            ) from exc
+
+        if role not in key_map:
+            available = ", ".join(sorted(key_map.keys()))
+            raise ValidPayError(
+                "invalid_role",
+                f"Role '{role}' is not defined in this document's disclosure policy. "
+                f"Available roles: {available}",
+            )
+        field_keys = key_map[role]
+
+        try:
+            encrypted_fields = json.loads(data["encrypted_payload"])
+        except json.JSONDecodeError as exc:
+            raise ValidPayError(
+                "invalid_payload",
+                "Encrypted payload is not a valid JSON envelope",
+            ) from exc
+
+        payload = decrypt_fields(encrypted_fields, field_keys)
+
+        integrity_verified = False
+        commitment_hash = data.get("commitment_hash")
+        if commitment_hash and role == "full":
+            all_keys = key_map.get("full", {})
+            full_payload = decrypt_fields(encrypted_fields, all_keys)
+            full_plaintext = json.dumps(full_payload)
+            actual_hash = compute_commitment_hash(full_plaintext)
+            if actual_hash != commitment_hash:
+                raise ValidPayError(
+                    "integrity_failure",
+                    "INTEGRITY VERIFICATION FAILED — the decrypted payload does not match "
+                    "the commitment hash stored at issuance.",
+                )
+            integrity_verified = True
 
         return VerifyIntentResult(
             intent_id=data.get("intent_id", ""),

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
 
 from cryptography.exceptions import InvalidTag
@@ -146,3 +147,73 @@ def decrypt(blob: str, key: str) -> str:
         ) from exc
 
     return plaintext.decode("utf-8")
+
+
+def encrypt_fields(payload: dict, generate_key_fn=None) -> tuple[dict, dict]:
+    """Encrypt each field in payload separately (Selective Field Disclosure, Patent E).
+
+    Args:
+        payload: Dict of field_name → value (values will be JSON-serialized).
+        generate_key_fn: Optional key generator (for testing). Defaults to generate_key.
+
+    Returns:
+        (encrypted_fields, field_keys) where:
+        - encrypted_fields: { field_name: base64_ciphertext }
+        - field_keys: { field_name: base64_key }
+    """
+    if generate_key_fn is None:
+        generate_key_fn = generate_key
+    encrypted_fields: dict = {}
+    field_keys: dict = {}
+    for name, value in payload.items():
+        key = generate_key_fn()
+        plaintext = json.dumps(value) if not isinstance(value, str) else value
+        encrypted_fields[name] = encrypt(plaintext, key)
+        field_keys[name] = key
+    return encrypted_fields, field_keys
+
+
+def build_key_map(field_keys: dict, disclosure_policy: dict) -> dict:
+    """Build the field key map from field keys and a disclosure policy.
+
+    Args:
+        field_keys: { field_name: base64_key } — all field keys.
+        disclosure_policy: { role_name: [field_name, ...] } — which role sees which fields.
+
+    Returns:
+        { role_name: { field_name: base64_key } } — each role gets only its
+        authorized keys. A "full" role is always added with every key.
+    """
+    key_map: dict = {}
+    for role, fields in disclosure_policy.items():
+        role_keys: dict = {}
+        for field in fields:
+            if field in field_keys:
+                role_keys[field] = field_keys[field]
+        key_map[role] = role_keys
+    # "full" role always gets all keys — the issuer view.
+    key_map["full"] = dict(field_keys)
+    return key_map
+
+
+def decrypt_fields(encrypted_fields: dict, field_keys: dict) -> dict:
+    """Decrypt only fields the caller has keys for; other fields become "[REDACTED]".
+
+    Args:
+        encrypted_fields: { field_name: base64_ciphertext }
+        field_keys: { field_name: base64_key } — keys for the fields this role can access.
+
+    Returns:
+        { field_name: decrypted_value_or_REDACTED }.
+    """
+    result: dict = {}
+    for name, ciphertext in encrypted_fields.items():
+        if name in field_keys:
+            plaintext = decrypt(ciphertext, field_keys[name])
+            try:
+                result[name] = json.loads(plaintext)
+            except (json.JSONDecodeError, ValueError):
+                result[name] = plaintext
+        else:
+            result[name] = "[REDACTED]"
+    return result

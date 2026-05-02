@@ -11,10 +11,13 @@ from validpay import (
     CreateIntentResult,
     ValidPayClient,
     ValidPayError,
+    build_key_map,
     combine_key_shares,
     compute_commitment_hash,
     decrypt,
+    decrypt_fields,
     encrypt,
+    encrypt_fields,
     generate_key,
     split_key,
 )
@@ -677,3 +680,194 @@ def test_network_error_wrapped_as_validpay_error():
     with pytest.raises(ValidPayError) as exc:
         client.create_intent(document_type="t", payload={})
     assert exc.value.code == "network_error"
+
+
+def test_create_selective_intent_sends_envelope_and_policy():
+    session = _FakeSession([
+        _FakeResponse(201, {
+            "retrieval_id": "vp_sel_1",
+            "status": "active",
+            "selective_disclosure": True,
+        }),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+
+    payload = {"name": "Alice", "amount": 100, "ssn": "111-22-3333"}
+    policy = {"bank": ["amount"], "auditor": ["amount", "name"]}
+    result = client.create_selective_intent(
+        document_type="check",
+        payload=payload,
+        disclosure_policy=policy,
+    )
+    assert result.retrieval_id == "vp_sel_1"
+
+    sent = json.loads(session.calls[0]["data"])
+    assert sent["selective_disclosure"] is True
+    assert sent["disclosure_policy"] == json.dumps(policy)
+    assert isinstance(sent["encrypted_key_map"], str)
+    # encrypted_payload must be a JSON envelope (dict of field → ciphertext),
+    # not a single opaque blob.
+    envelope = json.loads(sent["encrypted_payload"])
+    assert isinstance(envelope, dict)
+    assert set(envelope.keys()) == {"name", "amount", "ssn"}
+    # Plaintext values must not leak into the request body.
+    full_call = json.dumps(session.calls[0])
+    assert "Alice" not in full_call
+    assert "111-22-3333" not in full_call
+
+
+def test_create_selective_intent_validates_policy_fields():
+    client = ValidPayClient(api_key="k", session=_FakeSession([]))
+    with pytest.raises(ValidPayError) as exc:
+        client.create_selective_intent(
+            document_type="check",
+            payload={"name": "Alice"},
+            disclosure_policy={"bank": ["nonexistent"]},
+        )
+    assert exc.value.code == "invalid_argument"
+
+
+def test_verify_intent_rejects_selective_disclosure():
+    session = _FakeSession([
+        _FakeResponse(200, {
+            "intent_id": "vp_sel_2",
+            "encrypted_payload": json.dumps({"a": "blob"}),
+            "issuer": "Acme",
+            "issuer_verified": True,
+            "registered_at": "2026-05-02T00:00:00.000Z",
+            "status": "active",
+            "selective_disclosure": True,
+        }),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+    with pytest.raises(ValidPayError) as exc:
+        client.verify_intent(retrieval_id="vp_sel_2", key=generate_key())
+    assert exc.value.code == "selective_disclosure_required"
+
+
+def _build_selective_intent_response(payload: dict, policy: dict, *, intent_id: str = "vp_sel_x", split_key_flag: bool = False):
+    """Helper: produce the (master_key, server_response) for a selective intent."""
+    master_key = generate_key()
+    encrypted_fields, field_keys = encrypt_fields(payload)
+    key_map = build_key_map(field_keys, policy)
+    encrypted_key_map = encrypt(json.dumps(key_map), master_key)
+    commitment_hash = compute_commitment_hash(json.dumps(payload))
+    response = {
+        "intent_id": intent_id,
+        "encrypted_payload": json.dumps(encrypted_fields),
+        "issuer": "Acme",
+        "issuer_verified": True,
+        "registered_at": "2026-05-02T00:00:00.000Z",
+        "status": "active",
+        "split_key": split_key_flag,
+        "selective_disclosure": True,
+        "disclosure_policy": json.dumps(policy),
+        "encrypted_key_map": encrypted_key_map,
+        "commitment_hash": commitment_hash,
+    }
+    return master_key, response
+
+
+def test_verify_selective_intent_full_role_decrypts_all():
+    payload = {"name": "Alice", "amount": 100, "ssn": "111-22-3333"}
+    policy = {"bank": ["amount"]}
+    master_key, response = _build_selective_intent_response(payload, policy)
+
+    session = _FakeSession([_FakeResponse(200, response)])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+    result = client.verify_selective_intent(
+        retrieval_id="vp_sel_x",
+        key=master_key,
+        role="full",
+    )
+    assert result.payload == payload
+    assert result.integrity_verified is True
+
+
+def test_verify_selective_intent_partial_role_redacts():
+    payload = {"name": "Alice", "amount": 100, "ssn": "111-22-3333"}
+    policy = {"bank": ["amount"]}
+    master_key, response = _build_selective_intent_response(payload, policy)
+
+    session = _FakeSession([_FakeResponse(200, response)])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+    result = client.verify_selective_intent(
+        retrieval_id="vp_sel_x",
+        key=master_key,
+        role="bank",
+    )
+    assert result.payload["amount"] == 100
+    assert result.payload["name"] == "[REDACTED]"
+    assert result.payload["ssn"] == "[REDACTED]"
+    # Integrity check only runs for "full" role.
+    assert result.integrity_verified is False
+
+
+def test_verify_selective_intent_invalid_role_raises():
+    payload = {"name": "Alice", "amount": 100}
+    policy = {"bank": ["amount"]}
+    master_key, response = _build_selective_intent_response(payload, policy)
+
+    session = _FakeSession([_FakeResponse(200, response)])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+    with pytest.raises(ValidPayError) as exc:
+        client.verify_selective_intent(
+            retrieval_id="vp_sel_x",
+            key=master_key,
+            role="nonexistent",
+        )
+    assert exc.value.code == "invalid_role"
+
+
+def test_create_selective_intent_with_split_key():
+    """End-to-end: split-key + selective disclosure round-trip."""
+    payload = {"name": "Alice", "amount": 100, "ssn": "111-22-3333"}
+    policy = {"bank": ["amount"]}
+
+    create_session = _FakeSession([
+        _FakeResponse(201, {
+            "retrieval_id": "vp_sel_sk",
+            "status": "active",
+            "selective_disclosure": True,
+            "split_key": True,
+        }),
+    ])
+    creator = ValidPayClient(api_key="k", base_url="https://api.example.test", session=create_session)
+    create_result = creator.create_selective_intent(
+        document_type="check",
+        payload=payload,
+        disclosure_policy=policy,
+        split_key=True,
+    )
+
+    sent = json.loads(create_session.calls[0]["data"])
+    assert sent["split_key"] is True
+    assert sent["selective_disclosure"] is True
+    assert "key_fragment_b" in sent
+    # Share A is what came back to the caller — must differ from Share B.
+    assert create_result.key != sent["key_fragment_b"]
+
+    verify_session = _FakeSession([
+        _FakeResponse(200, {
+            "intent_id": "vp_sel_sk",
+            "encrypted_payload": sent["encrypted_payload"],
+            "issuer": "Acme",
+            "issuer_verified": True,
+            "registered_at": "2026-05-02T00:00:00.000Z",
+            "status": "active",
+            "split_key": True,
+            "selective_disclosure": True,
+            "disclosure_policy": sent["disclosure_policy"],
+            "encrypted_key_map": sent["encrypted_key_map"],
+            "commitment_hash": sent["commitment_hash"],
+        }),
+        _FakeResponse(200, {"intent_id": "vp_sel_sk", "fragment_b": sent["key_fragment_b"]}),
+    ])
+    verifier = ValidPayClient(api_key="k", base_url="https://api.example.test", session=verify_session)
+    result = verifier.verify_selective_intent(
+        retrieval_id="vp_sel_sk",
+        key=create_result.key,  # Share A
+        role="full",
+    )
+    assert result.payload == payload
+    assert result.integrity_verified is True

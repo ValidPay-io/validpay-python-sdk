@@ -7,10 +7,13 @@ import pytest
 
 from validpay import (
     ValidPayError,
+    build_key_map,
     combine_key_shares,
     compute_commitment_hash,
     decrypt,
+    decrypt_fields,
     encrypt,
+    encrypt_fields,
     generate_key,
     split_key,
 )
@@ -182,3 +185,63 @@ def test_combine_key_shares_rejects_wrong_length():
     with pytest.raises(ValidPayError) as exc:
         combine_key_shares(short, generate_key())
     assert exc.value.code == "invalid_key"
+
+
+def test_encrypt_fields_produces_unique_keys_per_field():
+    payload = {"name": "Alice", "amount": 100, "memo": "hi"}
+    encrypted_fields, field_keys = encrypt_fields(payload)
+    assert set(encrypted_fields.keys()) == {"name", "amount", "memo"}
+    assert set(field_keys.keys()) == {"name", "amount", "memo"}
+    keys = list(field_keys.values())
+    assert len(set(keys)) == 3, "each field must get a fresh AES key"
+    for k in keys:
+        assert len(base64.b64decode(k)) == 32
+
+
+def test_encrypt_fields_round_trip():
+    payload = {"name": "Alice", "amount": 100, "active": True, "tags": ["a", "b"]}
+    encrypted_fields, field_keys = encrypt_fields(payload)
+    for field, value in payload.items():
+        plaintext = decrypt(encrypted_fields[field], field_keys[field])
+        # Strings round-trip as raw plaintext; non-strings are JSON-encoded.
+        if isinstance(value, str):
+            assert plaintext == value
+        else:
+            import json as _json
+            assert _json.loads(plaintext) == value
+
+
+def test_build_key_map_includes_full_role():
+    payload = {"a": 1, "b": 2, "c": 3}
+    _, field_keys = encrypt_fields(payload)
+    key_map = build_key_map(field_keys, {"bank": ["a"]})
+    assert "full" in key_map
+    assert key_map["full"] == field_keys
+
+
+def test_build_key_map_restricts_roles():
+    payload = {"name": "Alice", "amount": 100, "ssn": "111-22-3333"}
+    _, field_keys = encrypt_fields(payload)
+    policy = {"bank": ["amount"], "auditor": ["amount", "name"]}
+    key_map = build_key_map(field_keys, policy)
+    assert set(key_map["bank"].keys()) == {"amount"}
+    assert key_map["bank"]["amount"] == field_keys["amount"]
+    assert set(key_map["auditor"].keys()) == {"amount", "name"}
+
+
+def test_decrypt_fields_redacts_unauthorized():
+    payload = {"name": "Alice", "amount": 100, "ssn": "111-22-3333"}
+    encrypted_fields, field_keys = encrypt_fields(payload)
+    # Bank role gets only "amount"
+    bank_keys = {"amount": field_keys["amount"]}
+    result = decrypt_fields(encrypted_fields, bank_keys)
+    assert result["amount"] == 100
+    assert result["name"] == "[REDACTED]"
+    assert result["ssn"] == "[REDACTED]"
+
+
+def test_decrypt_fields_full_access():
+    payload = {"name": "Alice", "amount": 100, "memo": "lunch"}
+    encrypted_fields, field_keys = encrypt_fields(payload)
+    result = decrypt_fields(encrypted_fields, field_keys)
+    assert result == payload

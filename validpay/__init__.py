@@ -9,10 +9,13 @@ Public API:
 
 from .client import ValidPayClient
 from .crypto import (
+    build_key_map,
     combine_key_shares,
     compute_commitment_hash,
     decrypt,
+    decrypt_fields,
     encrypt,
+    encrypt_fields,
     generate_key,
     split_key,
 )
@@ -30,6 +33,9 @@ __all__ = [
     "compute_commitment_hash",
     "split_key",
     "combine_key_shares",
+    "encrypt_fields",
+    "build_key_map",
+    "decrypt_fields",
 ]
 
 __version__ = "0.1.0"
