@@ -25,6 +25,7 @@ from .crypto import (
     split_key,
 )
 from .errors import ValidPayError
+from .offline import OfflineCache, OfflineVerifyResult
 from .types import CreateIntentResult, VerifyIntentResult
 
 __all__ = [
@@ -44,6 +45,8 @@ __all__ = [
     "compute_binding_hash",
     "compare_binding_hashes",
     "BindingComparisonResult",
+    "OfflineCache",
+    "OfflineVerifyResult",
 ]
 
 __version__ = "0.1.0"
