@@ -9,6 +9,7 @@ both directions.
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 
 from cryptography.exceptions import InvalidTag
@@ -24,6 +25,18 @@ _TAG_BYTES = 16
 def generate_key() -> str:
     """Generate a fresh AES-256 key as a base64 string (32 random bytes)."""
     return base64.b64encode(os.urandom(_KEY_BYTES)).decode("ascii")
+
+
+def compute_commitment_hash(plaintext: str) -> str:
+    """SHA-256 commitment hash of the plaintext payload (Hybrid Commitment Scheme).
+
+    Computed at issuance and stored alongside the ciphertext on the server.
+    At verification time, the same hash is recomputed against the freshly
+    decrypted plaintext; a mismatch proves the server tampered with or
+    swapped the ciphertext, since SHA-256 is one-way and the server cannot
+    forge a matching hash without the decryption key.
+    """
+    return hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
 
 
 def _decode_key(key: str) -> bytes:

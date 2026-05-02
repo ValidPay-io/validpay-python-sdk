@@ -11,6 +11,7 @@ from validpay import (
     CreateIntentResult,
     ValidPayClient,
     ValidPayError,
+    compute_commitment_hash,
     decrypt,
     encrypt,
     generate_key,
@@ -254,6 +255,134 @@ def test_create_intent_batch_rejects_malformed_items():
         client.create_intent_batch([{"payload": {}}])  # missing document_type
     with pytest.raises(ValidPayError):
         client.create_intent_batch([{"document_type": "t"}])  # missing payload
+
+
+def test_create_intent_sends_commitment_hash_matching_plaintext():
+    session = _FakeSession([
+        _FakeResponse(201, {"retrieval_id": "vp_h", "status": "active"}),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+
+    payload = {"payee": "Alice", "amount": 100}
+    client.create_intent(document_type="check", payload=payload)
+
+    sent = json.loads(session.calls[0]["data"])
+    expected_hash = compute_commitment_hash(json.dumps(payload))
+    assert sent["commitment_hash"] == expected_hash
+    assert len(sent["commitment_hash"]) == 64
+
+
+def test_create_intent_batch_includes_per_item_commitment_hash():
+    session = _FakeSession([
+        _FakeResponse(201, {
+            "results": [
+                {"retrieval_id": "vp_a", "status": "active"},
+                {"retrieval_id": "vp_b", "status": "active"},
+            ],
+            "count": 2,
+        }),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+
+    payloads = [{"x": 1}, {"y": 2}]
+    client.create_intent_batch([
+        {"document_type": "check", "payload": payloads[0]},
+        {"document_type": "check", "payload": payloads[1]},
+    ])
+    sent = json.loads(session.calls[0]["data"])["intents"]
+    assert sent[0]["commitment_hash"] == compute_commitment_hash(json.dumps(payloads[0]))
+    assert sent[1]["commitment_hash"] == compute_commitment_hash(json.dumps(payloads[1]))
+
+
+def test_verify_intent_with_matching_commitment_hash_sets_integrity_verified():
+    real_key = generate_key()
+    plaintext = json.dumps({"amount": 1500})
+    blob = encrypt(plaintext, real_key)
+    commitment_hash = compute_commitment_hash(plaintext)
+
+    session = _FakeSession([
+        _FakeResponse(200, {
+            "intent_id": "vp_int_1",
+            "encrypted_payload": blob,
+            "commitment_hash": commitment_hash,
+            "issuer": "Acme",
+            "issuer_verified": True,
+            "registered_at": "2026-05-02T00:00:00.000Z",
+            "status": "active",
+        }),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+
+    result = client.verify_intent(retrieval_id="vp_int_1", key=real_key)
+    assert result.integrity_verified is True
+    assert result.payload == {"amount": 1500}
+
+
+def test_verify_intent_with_mismatched_commitment_hash_raises_integrity_failure():
+    real_key = generate_key()
+    plaintext = json.dumps({"amount": 1500})
+    blob = encrypt(plaintext, real_key)
+    bad_hash = "0" * 64
+
+    session = _FakeSession([
+        _FakeResponse(200, {
+            "intent_id": "vp_int_2",
+            "encrypted_payload": blob,
+            "commitment_hash": bad_hash,
+            "issuer": "Acme",
+            "issuer_verified": True,
+            "registered_at": "2026-05-02T00:00:00.000Z",
+            "status": "active",
+        }),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+    with pytest.raises(ValidPayError) as exc:
+        client.verify_intent(retrieval_id="vp_int_2", key=real_key)
+    assert exc.value.code == "integrity_failure"
+
+
+def test_verify_intent_legacy_intent_without_commitment_hash_passes_with_integrity_false():
+    real_key = generate_key()
+    plaintext = json.dumps({"amount": 1500})
+    blob = encrypt(plaintext, real_key)
+
+    # No commitment_hash key in the response — simulates a legacy intent.
+    session = _FakeSession([
+        _FakeResponse(200, {
+            "intent_id": "vp_legacy",
+            "encrypted_payload": blob,
+            "issuer": "Acme",
+            "issuer_verified": True,
+            "registered_at": "2026-05-02T00:00:00.000Z",
+            "status": "active",
+        }),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+
+    result = client.verify_intent(retrieval_id="vp_legacy", key=real_key)
+    assert result.integrity_verified is False
+    assert result.payload == {"amount": 1500}
+
+
+def test_verify_intent_with_null_commitment_hash_passes_with_integrity_false():
+    real_key = generate_key()
+    plaintext = json.dumps({"a": 1})
+    blob = encrypt(plaintext, real_key)
+
+    session = _FakeSession([
+        _FakeResponse(200, {
+            "intent_id": "vp_null_hash",
+            "encrypted_payload": blob,
+            "commitment_hash": None,
+            "issuer": "Acme",
+            "issuer_verified": True,
+            "registered_at": "2026-05-02T00:00:00.000Z",
+            "status": "active",
+        }),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+    result = client.verify_intent(retrieval_id="vp_null_hash", key=real_key)
+    assert result.integrity_verified is False
 
 
 def test_network_error_wrapped_as_validpay_error():

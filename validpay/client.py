@@ -6,7 +6,7 @@ from urllib.parse import quote
 
 import requests
 
-from .crypto import decrypt, encrypt, generate_key
+from .crypto import compute_commitment_hash, decrypt, encrypt, generate_key
 from .errors import ValidPayError
 from .types import CreateIntentResult, VerifyIntentResult
 
@@ -59,12 +59,18 @@ class ValidPayClient:
             raise ValidPayError("invalid_argument", "document_type is required")
 
         key = generate_key()
-        encrypted_payload = encrypt(json.dumps(payload), key)
+        plaintext = json.dumps(payload)
+        commitment_hash = compute_commitment_hash(plaintext)
+        encrypted_payload = encrypt(plaintext, key)
 
         data = self._request(
             "POST",
             "/v1/intent",
-            body={"document_type": document_type, "encrypted_payload": encrypted_payload},
+            body={
+                "document_type": document_type,
+                "encrypted_payload": encrypted_payload,
+                "commitment_hash": commitment_hash,
+            },
             auth=True,
         )
 
@@ -117,9 +123,11 @@ class ValidPayClient:
                 )
             key = generate_key()
             keys.append(key)
+            plaintext = json.dumps(item["payload"])
             request_items.append({
                 "document_type": doc_type,
-                "encrypted_payload": encrypt(json.dumps(item["payload"]), key),
+                "encrypted_payload": encrypt(plaintext, key),
+                "commitment_hash": compute_commitment_hash(plaintext),
             })
 
         data = self._request(
@@ -178,6 +186,23 @@ class ValidPayClient:
             )
 
         decrypted = decrypt(data["encrypted_payload"], key)
+
+        # Hybrid Commitment Scheme — proves the server hasn't swapped the
+        # ciphertext. Server is blind so it can't forge a matching hash.
+        # Legacy intents (no hash stored) still verify, just without this check.
+        commitment_hash = data.get("commitment_hash")
+        integrity_verified = False
+        if commitment_hash:
+            actual_hash = compute_commitment_hash(decrypted)
+            if actual_hash != commitment_hash:
+                raise ValidPayError(
+                    "integrity_failure",
+                    "INTEGRITY VERIFICATION FAILED — the decrypted payload does not match "
+                    "the commitment hash stored at issuance. This may indicate server-side "
+                    "tampering or payload corruption.",
+                )
+            integrity_verified = True
+
         try:
             payload = json.loads(decrypted)
         except json.JSONDecodeError as exc:
@@ -193,6 +218,7 @@ class ValidPayClient:
             issuer_verified=bool(data.get("issuer_verified", False)),
             registered_at=data.get("registered_at", ""),
             status=data.get("status", ""),
+            integrity_verified=integrity_verified,
         )
 
     def _request(

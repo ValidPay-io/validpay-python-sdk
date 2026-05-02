@@ -32,6 +32,13 @@ class VerifyIntentResult:
             by ValidPay.
         registered_at: ISO-8601 timestamp of when the intent was created.
         status: Lifecycle status (e.g. ``"active"``, ``"revoked"``).
+        integrity_verified: ``True`` if the server returned a commitment
+            hash and it matched the recomputed hash of the decrypted
+            plaintext (Hybrid Commitment Scheme). ``False`` for legacy
+            intents created before the scheme was deployed — those still
+            decrypt successfully, they just haven't been integrity-checked.
+            A mismatch raises ``ValidPayError("integrity_failure")``
+            instead of returning a result.
     """
 
     intent_id: str
@@ -40,3 +47,4 @@ class VerifyIntentResult:
     issuer_verified: bool
     registered_at: str
     status: str
+    integrity_verified: bool

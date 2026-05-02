@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 
 import pytest
 
-from validpay import ValidPayError, decrypt, encrypt, generate_key
+from validpay import (
+    ValidPayError,
+    compute_commitment_hash,
+    decrypt,
+    encrypt,
+    generate_key,
+)
 
 
 def test_generate_key_returns_32_byte_base64():
@@ -110,3 +117,19 @@ def test_node_sdk_wire_format_compatibility():
 
     node_format_blob = base64.b64encode(iv + auth_tag + ciphertext).decode("ascii")
     assert decrypt(node_format_blob, key) == plaintext
+
+
+def test_commitment_hash_matches_sha256():
+    plaintext = '{"hello": "world"}'
+    expected = hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+    assert compute_commitment_hash(plaintext) == expected
+
+
+def test_commitment_hash_is_64_char_hex():
+    h = compute_commitment_hash("anything")
+    assert len(h) == 64
+    assert all(c in "0123456789abcdef" for c in h)
+
+
+def test_commitment_hash_changes_with_input():
+    assert compute_commitment_hash("a") != compute_commitment_hash("b")

@@ -8,7 +8,7 @@ Public API:
 """
 
 from .client import ValidPayClient
-from .crypto import decrypt, encrypt, generate_key
+from .crypto import compute_commitment_hash, decrypt, encrypt, generate_key
 from .errors import ValidPayError
 from .types import CreateIntentResult, VerifyIntentResult
 
@@ -20,6 +20,7 @@ __all__ = [
     "generate_key",
     "encrypt",
     "decrypt",
+    "compute_commitment_hash",
 ]
 
 __version__ = "0.1.0"
