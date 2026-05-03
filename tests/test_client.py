@@ -871,3 +871,253 @@ def test_create_selective_intent_with_split_key():
     )
     assert result.payload == payload
     assert result.integrity_verified is True
+
+
+# ---------------------------------------------------------------------------
+# Time-Locked Verification (Patent D)
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timedelta, timezone
+
+
+def _iso_in(seconds: int) -> str:
+    """Build an ISO-8601 UTC timestamp ``seconds`` from now (negative = past)."""
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+
+
+def test_create_intent_with_time_lock():
+    session = _FakeSession([
+        _FakeResponse(201, {"retrieval_id": "vp_tl_1", "status": "active"}),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+    vf = _iso_in(60)
+    vu = _iso_in(3600)
+    result = client.create_intent(
+        document_type="check",
+        payload={"a": 1},
+        valid_from=vf,
+        valid_until=vu,
+    )
+    assert result.retrieval_id == "vp_tl_1"
+    sent = json.loads(session.calls[0]["data"])
+    assert sent["valid_from"] == vf
+    assert sent["valid_until"] == vu
+
+
+def test_create_intent_time_lock_validation():
+    client = ValidPayClient(api_key="k", session=_FakeSession([]))
+    vf = _iso_in(3600)
+    vu = _iso_in(60)  # before valid_from
+    with pytest.raises(ValidPayError) as exc:
+        client.create_intent(
+            document_type="check",
+            payload={"a": 1},
+            valid_from=vf,
+            valid_until=vu,
+        )
+    assert exc.value.code == "invalid_argument"
+
+
+def test_create_intent_with_only_valid_from():
+    session = _FakeSession([
+        _FakeResponse(201, {"retrieval_id": "vp_tl_2", "status": "active"}),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+    vf = _iso_in(60)
+    client.create_intent(document_type="check", payload={"a": 1}, valid_from=vf)
+    sent = json.loads(session.calls[0]["data"])
+    assert sent["valid_from"] == vf
+    assert "valid_until" not in sent
+
+
+def test_create_intent_with_only_valid_until():
+    session = _FakeSession([
+        _FakeResponse(201, {"retrieval_id": "vp_tl_3", "status": "active"}),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+    vu = _iso_in(3600)
+    client.create_intent(document_type="check", payload={"a": 1}, valid_until=vu)
+    sent = json.loads(session.calls[0]["data"])
+    assert sent["valid_until"] == vu
+    assert "valid_from" not in sent
+
+
+def test_create_intent_without_time_lock():
+    session = _FakeSession([
+        _FakeResponse(201, {"retrieval_id": "vp_tl_4", "status": "active"}),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+    client.create_intent(document_type="check", payload={"a": 1})
+    sent = json.loads(session.calls[0]["data"])
+    assert "valid_from" not in sent
+    assert "valid_until" not in sent
+
+
+def test_verify_intent_time_lock_valid():
+    real_key = generate_key()
+    plaintext = json.dumps({"x": 1})
+    blob = encrypt(plaintext, real_key)
+    vf = _iso_in(-3600)
+    vu = _iso_in(3600)
+    session = _FakeSession([
+        _FakeResponse(200, {
+            "intent_id": "vp_tl_v",
+            "encrypted_payload": blob,
+            "issuer": "Acme",
+            "issuer_verified": True,
+            "registered_at": "2026-05-02T00:00:00.000Z",
+            "status": "active",
+            "valid_from": vf,
+            "valid_until": vu,
+        }),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+    result = client.verify_intent(retrieval_id="vp_tl_v", key=real_key)
+    assert result.time_lock_status == "valid"
+    assert result.valid_from == vf
+    assert result.valid_until == vu
+
+
+def test_verify_intent_time_lock_not_yet_valid():
+    real_key = generate_key()
+    plaintext = json.dumps({"x": 1})
+    blob = encrypt(plaintext, real_key)
+    vf = _iso_in(3600)
+    session = _FakeSession([
+        _FakeResponse(200, {
+            "intent_id": "vp_tl_n",
+            "encrypted_payload": blob,
+            "issuer": "Acme",
+            "issuer_verified": True,
+            "registered_at": "2026-05-02T00:00:00.000Z",
+            "status": "active",
+            "valid_from": vf,
+            "valid_until": None,
+        }),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+    # Critical: must NOT raise; surface status on the result instead.
+    result = client.verify_intent(retrieval_id="vp_tl_n", key=real_key)
+    assert result.time_lock_status == "not_yet_valid"
+    assert result.valid_from == vf
+
+
+def test_verify_intent_time_lock_expired():
+    real_key = generate_key()
+    plaintext = json.dumps({"x": 1})
+    blob = encrypt(plaintext, real_key)
+    vu = _iso_in(-3600)
+    session = _FakeSession([
+        _FakeResponse(200, {
+            "intent_id": "vp_tl_e",
+            "encrypted_payload": blob,
+            "issuer": "Acme",
+            "issuer_verified": True,
+            "registered_at": "2026-05-02T00:00:00.000Z",
+            "status": "active",
+            "valid_from": None,
+            "valid_until": vu,
+        }),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+    result = client.verify_intent(retrieval_id="vp_tl_e", key=real_key)
+    assert result.time_lock_status == "expired"
+    assert result.valid_until == vu
+
+
+def test_verify_intent_no_time_lock():
+    real_key = generate_key()
+    plaintext = json.dumps({"x": 1})
+    blob = encrypt(plaintext, real_key)
+    session = _FakeSession([
+        _FakeResponse(200, {
+            "intent_id": "vp_tl_none",
+            "encrypted_payload": blob,
+            "issuer": "Acme",
+            "issuer_verified": True,
+            "registered_at": "2026-05-02T00:00:00.000Z",
+            "status": "active",
+        }),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+    result = client.verify_intent(retrieval_id="vp_tl_none", key=real_key)
+    assert result.time_lock_status is None
+    assert result.valid_from is None
+    assert result.valid_until is None
+
+
+def test_verify_split_key_intent_time_lock():
+    payload = {"a": 1}
+    create_session = _FakeSession([
+        _FakeResponse(201, {"retrieval_id": "vp_tl_sk", "status": "active", "split_key": True}),
+    ])
+    creator = ValidPayClient(api_key="k", base_url="https://api.example.test", session=create_session)
+    create_result = creator.create_split_key_intent(document_type="check", payload=payload)
+    sent = json.loads(create_session.calls[0]["data"])
+
+    vf = _iso_in(-3600)
+    vu = _iso_in(3600)
+    verify_session = _FakeSession([
+        _FakeResponse(200, {
+            "intent_id": "vp_tl_sk",
+            "encrypted_payload": sent["encrypted_payload"],
+            "issuer": "Acme",
+            "issuer_verified": True,
+            "registered_at": "2026-05-02T00:00:00.000Z",
+            "status": "active",
+            "split_key": True,
+            "commitment_hash": sent["commitment_hash"],
+            "valid_from": vf,
+            "valid_until": vu,
+        }),
+        _FakeResponse(200, {"intent_id": "vp_tl_sk", "fragment_b": sent["key_fragment_b"]}),
+    ])
+    verifier = ValidPayClient(api_key="k", base_url="https://api.example.test", session=verify_session)
+    result = verifier.verify_split_key_intent(retrieval_id="vp_tl_sk", share_a=create_result.key)
+    assert result.time_lock_status == "valid"
+    assert result.valid_from == vf
+    assert result.valid_until == vu
+
+
+def test_create_intent_batch_with_time_lock():
+    session = _FakeSession([
+        _FakeResponse(201, {
+            "results": [
+                {"retrieval_id": "vp_b1", "status": "active"},
+                {"retrieval_id": "vp_b2", "status": "active"},
+            ],
+            "count": 2,
+        }),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+    vf = _iso_in(60)
+    vu = _iso_in(3600)
+    client.create_intent_batch([
+        {"document_type": "check", "payload": {"a": 1}, "valid_from": vf, "valid_until": vu},
+        {"document_type": "check", "payload": {"b": 2}},  # no time-lock
+    ])
+    sent_items = json.loads(session.calls[0]["data"])["intents"]
+    assert sent_items[0]["valid_from"] == vf
+    assert sent_items[0]["valid_until"] == vu
+    assert "valid_from" not in sent_items[1]
+    assert "valid_until" not in sent_items[1]
+
+
+def test_create_split_key_intent_with_time_lock():
+    session = _FakeSession([
+        _FakeResponse(201, {"retrieval_id": "vp_sk_tl", "status": "active", "split_key": True}),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+    vf = _iso_in(60)
+    vu = _iso_in(3600)
+    client.create_split_key_intent(
+        document_type="check",
+        payload={"a": 1},
+        valid_from=vf,
+        valid_until=vu,
+    )
+    sent = json.loads(session.calls[0]["data"])
+    assert sent["split_key"] is True
+    assert "key_fragment_b" in sent
+    assert sent["valid_from"] == vf
+    assert sent["valid_until"] == vu

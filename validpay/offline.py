@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from ._timelock import compute_time_lock_status
 from .crypto import (
     combine_key_shares,
     compute_commitment_hash,
@@ -103,6 +104,8 @@ class OfflineCache:
         encrypted_key_map: Optional[str] = None,
         disclosure_policy: Optional[str] = None,
         status: str = "active",
+        valid_from: Optional[str] = None,
+        valid_until: Optional[str] = None,
     ) -> None:
         """Store a verified intent for offline access.
 
@@ -121,6 +124,8 @@ class OfflineCache:
             "encrypted_key_map": encrypted_key_map,
             "disclosure_policy": disclosure_policy,
             "status": status,
+            "valid_from": valid_from,
+            "valid_until": valid_until,
             "cached_at": now,
             "last_online_check": now,
         }
@@ -145,6 +150,10 @@ class OfflineCache:
                 "verification is available.",
             )
 
+        valid_from = entry.get("valid_from")
+        valid_until = entry.get("valid_until")
+        time_lock_status = compute_time_lock_status(valid_from, valid_until)
+
         if entry.get("status") == "revoked":
             return OfflineVerifyResult(
                 retrieval_id=retrieval_id,
@@ -156,6 +165,9 @@ class OfflineCache:
                 cached_at=entry.get("cached_at"),
                 last_online_check=entry.get("last_online_check"),
                 stale=self._is_stale(entry),
+                valid_from=valid_from,
+                valid_until=valid_until,
+                time_lock_status=time_lock_status,
             )
 
         decryption_key = key
@@ -205,6 +217,9 @@ class OfflineCache:
             cached_at=entry.get("cached_at"),
             last_online_check=entry.get("last_online_check"),
             stale=self._is_stale(entry),
+            valid_from=valid_from,
+            valid_until=valid_until,
+            time_lock_status=time_lock_status,
         )
 
     def mark_revoked(self, retrieval_id: str) -> None:
@@ -271,6 +286,9 @@ class OfflineVerifyResult:
         cached_at: Optional[float],
         last_online_check: Optional[float],
         stale: bool,
+        valid_from: Optional[str] = None,
+        valid_until: Optional[str] = None,
+        time_lock_status: Optional[str] = None,
     ) -> None:
         self.retrieval_id = retrieval_id
         self.payload = payload
@@ -280,6 +298,9 @@ class OfflineVerifyResult:
         self.offline = offline
         self.cached_at = cached_at
         self.last_online_check = last_online_check
+        self.valid_from = valid_from
+        self.valid_until = valid_until
+        self.time_lock_status = time_lock_status
         self.stale = stale
 
     def __repr__(self) -> str:

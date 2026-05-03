@@ -52,6 +52,37 @@ print(verification.issuer_verified) # True
 print(verification.status)          # "active"
 ```
 
+### Time-Locked Verification (Patent D)
+
+Restrict when a document can be verified by specifying a validity window:
+
+```python
+from datetime import datetime, timezone, timedelta
+
+result = client.create_intent(
+    document_type="check",
+    payload={"payee": "Jane Doe", "amount": 1500.00},
+    valid_from=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+    valid_until=(datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
+)
+
+# Later, when verifying:
+verified = client.verify_intent(result.retrieval_id, result.key)
+print(verified.time_lock_status)  # "valid", "not_yet_valid", or "expired"
+print(verified.valid_from)        # ISO-8601 timestamp or None
+print(verified.valid_until)       # ISO-8601 timestamp or None
+```
+
+Time-lock status is informational — the SDK always returns the decrypted
+payload regardless of the time window. Your application decides how to
+handle `not_yet_valid` or `expired` results. The server stores the
+timestamps but never enforces them; this preserves the blind intermediary
+model (the server never decides whether a document is "still good").
+
+The same `valid_from` / `valid_until` keyword arguments are accepted by
+`create_intent_batch` (per-item), `create_split_key_intent`, and
+`create_selective_intent`.
+
 ## API
 
 ### `ValidPayClient(api_key, *, base_url=..., timeout=30.0, session=None)`

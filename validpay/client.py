@@ -6,6 +6,8 @@ from urllib.parse import quote
 
 import requests
 
+from ._timelock import compute_time_lock_status as _compute_time_lock_status
+from ._timelock import validate_time_lock as _validate_time_lock
 from .crypto import (
     build_key_map,
     combine_key_shares,
@@ -52,6 +54,9 @@ class ValidPayClient:
         self,
         document_type: str,
         payload: Any,
+        *,
+        valid_from: Optional[str] = None,
+        valid_until: Optional[str] = None,
     ) -> CreateIntentResult:
         """Encrypt ``payload`` locally and register it with the ValidPay API.
 
@@ -60,6 +65,12 @@ class ValidPayClient:
                 (``"check"``, ``"money_order"``, ``"ssn_card"``, etc.).
             payload: Any JSON-serializable object. Will be ``json.dumps``ed
                 and AES-256-GCM encrypted before transmission.
+            valid_from: Optional ISO-8601 timestamp. The verifier surfaces
+                "not yet valid" status before this time. Server stores the
+                value but does NOT enforce it (Patent D — Time-Locked
+                Verification, blind intermediary preserved).
+            valid_until: Optional ISO-8601 timestamp. The verifier surfaces
+                "expired" status after this time.
 
         Returns:
             A :class:`CreateIntentResult` containing the retrieval id and
@@ -67,20 +78,27 @@ class ValidPayClient:
         """
         if not document_type:
             raise ValidPayError("invalid_argument", "document_type is required")
+        _validate_time_lock(valid_from, valid_until)
 
         key = generate_key()
         plaintext = json.dumps(payload)
         commitment_hash = compute_commitment_hash(plaintext)
         encrypted_payload = encrypt(plaintext, key)
 
+        body: Dict[str, Any] = {
+            "document_type": document_type,
+            "encrypted_payload": encrypted_payload,
+            "commitment_hash": commitment_hash,
+        }
+        if valid_from is not None:
+            body["valid_from"] = valid_from
+        if valid_until is not None:
+            body["valid_until"] = valid_until
+
         data = self._request(
             "POST",
             "/v1/intent",
-            body={
-                "document_type": document_type,
-                "encrypted_payload": encrypted_payload,
-                "commitment_hash": commitment_hash,
-            },
+            body=body,
             auth=True,
         )
 
@@ -131,14 +149,29 @@ class ValidPayClient:
                     "invalid_argument",
                     f"intents[{idx}].payload is required",
                 )
+            valid_from = item.get("valid_from")
+            valid_until = item.get("valid_until")
+            try:
+                _validate_time_lock(valid_from, valid_until)
+            except ValidPayError as exc:
+                raise ValidPayError(
+                    "invalid_argument",
+                    f"intents[{idx}]: {exc.message}",
+                ) from exc
+
             key = generate_key()
             keys.append(key)
             plaintext = json.dumps(item["payload"])
-            request_items.append({
+            req_item: Dict[str, Any] = {
                 "document_type": doc_type,
                 "encrypted_payload": encrypt(plaintext, key),
                 "commitment_hash": compute_commitment_hash(plaintext),
-            })
+            }
+            if valid_from is not None:
+                req_item["valid_from"] = valid_from
+            if valid_until is not None:
+                req_item["valid_until"] = valid_until
+            request_items.append(req_item)
 
         data = self._request(
             "POST",
@@ -261,6 +294,10 @@ class ValidPayClient:
                 "Decrypted payload is not valid JSON",
             ) from exc
 
+        valid_from_str = data.get("valid_from")
+        valid_until_str = data.get("valid_until")
+        time_lock_status = _compute_time_lock_status(valid_from_str, valid_until_str)
+
         return VerifyIntentResult(
             intent_id=data.get("intent_id", ""),
             payload=payload,
@@ -269,12 +306,18 @@ class ValidPayClient:
             registered_at=data.get("registered_at", ""),
             status=data.get("status", ""),
             integrity_verified=integrity_verified,
+            valid_from=valid_from_str,
+            valid_until=valid_until_str,
+            time_lock_status=time_lock_status,
         )
 
     def create_split_key_intent(
         self,
         document_type: str,
         payload: Any,
+        *,
+        valid_from: Optional[str] = None,
+        valid_until: Optional[str] = None,
     ) -> CreateIntentResult:
         """Create an intent with split-key protection (Patent C).
 
@@ -296,6 +339,7 @@ class ValidPayClient:
         """
         if not document_type:
             raise ValidPayError("invalid_argument", "document_type is required")
+        _validate_time_lock(valid_from, valid_until)
 
         full_key = generate_key()
         share_a, share_b = split_key_fn(full_key)
@@ -304,16 +348,22 @@ class ValidPayClient:
         commitment_hash = compute_commitment_hash(plaintext)
         encrypted_payload = encrypt(plaintext, full_key)
 
+        body: Dict[str, Any] = {
+            "document_type": document_type,
+            "encrypted_payload": encrypted_payload,
+            "commitment_hash": commitment_hash,
+            "split_key": True,
+            "key_fragment_b": share_b,
+        }
+        if valid_from is not None:
+            body["valid_from"] = valid_from
+        if valid_until is not None:
+            body["valid_until"] = valid_until
+
         data = self._request(
             "POST",
             "/v1/intent",
-            body={
-                "document_type": document_type,
-                "encrypted_payload": encrypted_payload,
-                "commitment_hash": commitment_hash,
-                "split_key": True,
-                "key_fragment_b": share_b,
-            },
+            body=body,
             auth=True,
         )
 
@@ -421,6 +471,10 @@ class ValidPayClient:
                 "Decrypted payload is not valid JSON",
             ) from exc
 
+        valid_from_str = data.get("valid_from")
+        valid_until_str = data.get("valid_until")
+        time_lock_status = _compute_time_lock_status(valid_from_str, valid_until_str)
+
         return VerifyIntentResult(
             intent_id=data.get("intent_id", ""),
             payload=payload,
@@ -429,6 +483,9 @@ class ValidPayClient:
             registered_at=data.get("registered_at", ""),
             status=data.get("status", ""),
             integrity_verified=integrity_verified,
+            valid_from=valid_from_str,
+            valid_until=valid_until_str,
+            time_lock_status=time_lock_status,
         )
 
     def create_selective_intent(
@@ -438,6 +495,8 @@ class ValidPayClient:
         disclosure_policy: dict,
         *,
         split_key: bool = False,
+        valid_from: Optional[str] = None,
+        valid_until: Optional[str] = None,
     ) -> CreateIntentResult:
         """Create an intent with per-field encryption and a disclosure policy (Patent E).
 
@@ -464,6 +523,7 @@ class ValidPayClient:
             raise ValidPayError("invalid_argument", "payload must be a non-empty dict")
         if not disclosure_policy or not isinstance(disclosure_policy, dict):
             raise ValidPayError("invalid_argument", "disclosure_policy must be a non-empty dict")
+        _validate_time_lock(valid_from, valid_until)
 
         for role, fields in disclosure_policy.items():
             if not isinstance(fields, list):
@@ -505,6 +565,10 @@ class ValidPayClient:
         }
         if key_fragment_b is not None:
             body["key_fragment_b"] = key_fragment_b
+        if valid_from is not None:
+            body["valid_from"] = valid_from
+        if valid_until is not None:
+            body["valid_until"] = valid_until
 
         data = self._request("POST", "/v1/intent", body=body, auth=True)
 
@@ -643,6 +707,10 @@ class ValidPayClient:
                 )
             integrity_verified = True
 
+        valid_from_str = data.get("valid_from")
+        valid_until_str = data.get("valid_until")
+        time_lock_status = _compute_time_lock_status(valid_from_str, valid_until_str)
+
         return VerifyIntentResult(
             intent_id=data.get("intent_id", ""),
             payload=payload,
@@ -651,6 +719,9 @@ class ValidPayClient:
             registered_at=data.get("registered_at", ""),
             status=data.get("status", ""),
             integrity_verified=integrity_verified,
+            valid_from=valid_from_str,
+            valid_until=valid_until_str,
+            time_lock_status=time_lock_status,
         )
 
     def create_bound_intent(

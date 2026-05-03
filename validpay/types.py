@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 
 @dataclass(frozen=True)
@@ -48,3 +48,9 @@ class VerifyIntentResult:
     registered_at: str
     status: str
     integrity_verified: bool
+    # Time-Locked Verification (Patent D). All None for intents with no
+    # validity window. ``time_lock_status`` is "valid", "not_yet_valid", or
+    # "expired" when a window exists.
+    valid_from: Optional[str] = None
+    valid_until: Optional[str] = None
+    time_lock_status: Optional[str] = None

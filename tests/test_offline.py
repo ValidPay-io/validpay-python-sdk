@@ -227,3 +227,51 @@ class TestStaleness:
         assert cache.get_stale_entries() != []
         cache.update_online_check(sample_intent["retrieval_id"])
         assert cache.get_stale_entries() == []
+
+
+# ---------------------------------------------------------------------------
+# Time-Locked Verification (Patent D) — offline path
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timedelta, timezone
+
+
+def _iso_in(seconds: int) -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+
+
+class TestOfflineTimeLock:
+    def test_offline_verify_with_time_lock(self, cache, sample_intent):
+        vf = _iso_in(-3600)
+        vu = _iso_in(3600)
+        cache.store(
+            sample_intent["retrieval_id"],
+            sample_intent["key"],
+            sample_intent["encrypted_payload"],
+            commitment_hash=sample_intent["commitment_hash"],
+            valid_from=vf,
+            valid_until=vu,
+        )
+        result = cache.verify_offline(
+            sample_intent["retrieval_id"],
+            sample_intent["key"],
+        )
+        assert result.time_lock_status == "valid"
+        assert result.valid_from == vf
+        assert result.valid_until == vu
+
+    def test_offline_verify_expired(self, cache, sample_intent):
+        vu = _iso_in(-3600)  # past
+        cache.store(
+            sample_intent["retrieval_id"],
+            sample_intent["key"],
+            sample_intent["encrypted_payload"],
+            commitment_hash=sample_intent["commitment_hash"],
+            valid_until=vu,
+        )
+        result = cache.verify_offline(
+            sample_intent["retrieval_id"],
+            sample_intent["key"],
+        )
+        assert result.time_lock_status == "expired"
+        assert result.valid_until == vu
