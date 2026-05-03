@@ -1,0 +1,7 @@
+include LICENSE
+include README.md
+include CHANGELOG.md
+recursive-include validpay *.py
+prune tests
+prune check21
+prune .github
