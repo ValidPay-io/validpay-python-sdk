@@ -15,6 +15,13 @@ versa.
 pip install validpay
 ```
 
+For physical-binding support (Patent F — image-based binding zones), install
+the optional extras:
+
+```bash
+pip install validpay[binding]
+```
+
 Requires Python 3.9+.
 
 ## Quick start
@@ -82,6 +89,78 @@ model (the server never decides whether a document is "still good").
 The same `valid_from` / `valid_until` keyword arguments are accepted by
 `create_intent_batch` (per-item), `create_split_key_intent`, and
 `create_selective_intent`.
+
+### Split-key intents (Patent C)
+
+Splits the AES key into two XOR shares: Share A is returned to the caller
+(typically embedded in the QR code), Share B is stored server-side. Neither
+share alone can decrypt the payload.
+
+```python
+result = client.create_split_key_intent(
+    document_type="ssn_card",
+    payload={"ssn": "123-45-6789"},
+)
+# result.key is Share A — pair it with Share B at verification time.
+
+verified = client.verify_split_key_intent(result.retrieval_id, result.key)
+print(verified.payload)
+```
+
+### Selective disclosure (Patent E)
+
+Each field is encrypted with its own per-field key. A disclosure policy maps
+role names to the fields that role may decrypt. A `full` role with access to
+every field is added automatically.
+
+```python
+result = client.create_selective_intent(
+    document_type="check",
+    payload={"payee": "Alice", "amount": 1500.00, "memo": "rent"},
+    disclosure_policy={"bank": ["amount"], "auditor": ["amount", "payee"]},
+)
+
+# Bank sees only 'amount'; other fields come back as REDACTED markers.
+verified = client.verify_selective_intent(result.retrieval_id, result.key, role="bank")
+print(verified.payload)
+```
+
+`create_selective_intent` accepts `split_key=True` to combine Patents C + E.
+
+### Revocation (Patent H — Blind Revocation)
+
+Issuers can revoke or reinstate an intent without decrypting it. Verifiers
+of a revoked intent receive `status="revoked"` and no encrypted payload.
+
+```python
+client.revoke_intent("vp_abc123def456", reason="Stop payment")
+client.reinstate_intent("vp_abc123def456", reason="False alarm")
+
+history = client.get_revocation_history("vp_abc123def456")
+for event in history:
+    print(event["action"], event["reason"], event["performed_at"])
+```
+
+### Offline verification (Patent G)
+
+`OfflineCache` lets verifiers cache intents locally and verify them without
+network access. Cached entries are encrypted at rest with a caller-supplied
+key.
+
+```python
+from validpay.offline import OfflineCache
+
+cache = OfflineCache("./offline.db", cache_key="optional-aes-key-base64")
+cache.store(retrieval_id="vp_abc123def456", key=result.key,
+            encrypted_payload=..., issuer="Acme Bank")
+
+verified = cache.verify_offline("vp_abc123def456", result.key)
+print(verified.payload, verified.time_lock_status)
+```
+
+`OfflineCache.list_entries()`, `mark_revoked()`, `update_online_check()`, and
+`get_stale_entries()` round out the cache lifecycle for verifier devices that
+periodically reconcile with the live API.
 
 ## API
 
