@@ -141,27 +141,6 @@ for event in history:
     print(event["action"], event["reason"], event["performed_at"])
 ```
 
-### Offline verification (Patent G)
-
-`OfflineCache` lets verifiers cache intents locally and verify them without
-network access. Cached entries are encrypted at rest with a caller-supplied
-key.
-
-```python
-from validpay.offline import OfflineCache
-
-cache = OfflineCache("./offline.db", cache_key="optional-aes-key-base64")
-cache.store(retrieval_id="vp_abc123def456", key=result.key,
-            encrypted_payload=..., issuer="Acme Bank")
-
-verified = cache.verify_offline("vp_abc123def456", result.key)
-print(verified.payload, verified.time_lock_status)
-```
-
-`OfflineCache.list_entries()`, `mark_revoked()`, `update_online_check()`, and
-`get_stale_entries()` round out the cache lifecycle for verifier devices that
-periodically reconcile with the live API.
-
 ## API
 
 ### `ValidPayClient(api_key, *, base_url=..., timeout=30.0, session=None)`
