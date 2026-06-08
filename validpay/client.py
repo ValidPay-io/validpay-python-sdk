@@ -22,7 +22,7 @@ from .crypto import (
 from .errors import ValidPayError
 from .types import CreateIntentResult, VerifyIntentResult
 
-DEFAULT_BASE_URL = "https://api.validpay.io"
+DEFAULT_BASE_URL = "https://api.validpay.com"
 DEFAULT_TIMEOUT = 30.0
 
 

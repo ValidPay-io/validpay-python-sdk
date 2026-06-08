@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "validpay"
-version = "1.0.0"
+version = "1.0.1"
 description = "Official ValidPay Python SDK — client-side AES-256-GCM encryption + ValidPay API client"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -41,8 +41,8 @@ dev = [
 binding = ["Pillow>=10.0", "numpy>=1.24", "scipy>=1.10"]
 
 [project.urls]
-Homepage = "https://validpay.io"
-Documentation = "https://validpay.io/docs/api"
+Homepage = "https://validpay.com"
+Documentation = "https://validpay.com/docs/api"
 Repository = "https://github.com/ValidPay-io/validpay-python-sdk"
 Issues = "https://github.com/ValidPay-io/validpay-python-sdk/issues"
 Changelog = "https://github.com/ValidPay-io/validpay-python-sdk/blob/main/CHANGELOG.md"
