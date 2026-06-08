@@ -5,6 +5,18 @@ All notable changes to the ValidPay Python SDK will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-06-08
+
+### Changed
+
+- `DEFAULT_BASE_URL` is now `https://api.validpay.com` (Prompt 086B —
+  primary domain migrated from validpay.io). The legacy host keeps
+  working via Cloudflare 301 redirects, so 1.0.0 installs are
+  unaffected; new installs default to `.com`. The `base_url` constructor
+  argument continues to override.
+- README + `pyproject.toml` URLs (Homepage, Documentation) now point at
+  `validpay.com`.
+
 ## [1.0.0] - 2026-05-03
 
 ### Added

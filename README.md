@@ -1,6 +1,6 @@
 # ValidPay Python SDK
 
-Official Python SDK for the [ValidPay](https://validpay.io) document
+Official Python SDK for the [ValidPay](https://validpay.com) document
 verification API. Provides client-side AES-256-GCM encryption and a thin
 client around the ValidPay HTTP API.
 
@@ -146,7 +146,7 @@ for event in history:
 ### `ValidPayClient(api_key, *, base_url=..., timeout=30.0, session=None)`
 
 - `api_key` — your ValidPay API key (required for create endpoints).
-- `base_url` — defaults to `https://api.validpay.io`.
+- `base_url` — defaults to `https://api.validpay.com`.
 - `timeout` — per-request timeout in seconds.
 - `session` — optionally provide a `requests.Session` for connection
   pooling, custom adapters, or mocking in tests.
