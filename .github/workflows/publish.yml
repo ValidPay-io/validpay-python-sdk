@@ -3,6 +3,10 @@ name: Publish to PyPI
 on:
   release:
     types: [published]
+  # Allow re-firing publishes when a release run failed (e.g. v1.0.1's
+  # first run hit the contents-permission bug before this block was
+  # added). Run against `main` after a release tag is in place.
+  workflow_dispatch: {}
 
 jobs:
   publish:
@@ -10,6 +14,9 @@ jobs:
     environment: pypi
     permissions:
       id-token: write  # Required for trusted publishing
+      contents: read   # Required so actions/checkout can fetch the
+                       # release tag (defaults to NONE when any other
+                       # permission is set explicitly).
 
     steps:
       - uses: actions/checkout@v4
