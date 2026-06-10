@@ -8,7 +8,7 @@ version = "1.0.1"
 description = "Official ValidPay Python SDK — client-side AES-256-GCM encryption + ValidPay API client"
 readme = "README.md"
 license = { file = "LICENSE" }
-authors = [{ name = "ValidPay", email = "dev@validpay.io" }]
+authors = [{ name = "ValidPay", email = "dev@validpay.com" }]
 requires-python = ">=3.9"
 keywords = [
     "validpay",
