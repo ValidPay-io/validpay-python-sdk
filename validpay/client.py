@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 from urllib.parse import quote
 
@@ -57,8 +58,16 @@ class ValidPayClient:
         *,
         valid_from: Optional[str] = None,
         valid_until: Optional[str] = None,
+        split_key: bool = True,
     ) -> CreateIntentResult:
         """Encrypt ``payload`` locally and register it with the ValidPay API.
+
+        As of SDK 1.1.0 this uses **split-key protection (Patent C) by
+        default**: the AES-256 key is split into two XOR shares — Share A
+        is returned to you (embed it in the QR code exactly as you would
+        the key before), Share B is stored on the ValidPay server. The
+        full decryption key never exists on any single system after this
+        call returns.
 
         Args:
             document_type: A short string identifying the document kind
@@ -71,25 +80,37 @@ class ValidPayClient:
                 Verification, blind intermediary preserved).
             valid_until: Optional ISO-8601 timestamp. The verifier surfaces
                 "expired" status after this time.
+            split_key: Default ``True``. Set ``False`` for the legacy
+                single-key flow, where ``key`` in the result is the full
+                AES key. Verification of legacy intents is unchanged.
 
         Returns:
             A :class:`CreateIntentResult` containing the retrieval id and
-            the freshly-generated AES key (base64).
+            the key material (base64): **Share A** when ``split_key=True``
+            (the default), the full AES key when ``split_key=False``.
         """
         if not document_type:
             raise ValidPayError("invalid_argument", "document_type is required")
         _validate_time_lock(valid_from, valid_until)
 
-        key = generate_key()
+        full_key = generate_key()
+        share_b: Optional[str] = None
+        result_key = full_key
+        if split_key:
+            result_key, share_b = split_key_fn(full_key)
+
         plaintext = json.dumps(payload)
         commitment_hash = compute_commitment_hash(plaintext)
-        encrypted_payload = encrypt(plaintext, key)
+        encrypted_payload = encrypt(plaintext, full_key)
 
         body: Dict[str, Any] = {
             "document_type": document_type,
             "encrypted_payload": encrypted_payload,
             "commitment_hash": commitment_hash,
         }
+        if split_key:
+            body["split_key"] = True
+            body["key_fragment_b"] = share_b
         if valid_from is not None:
             body["valid_from"] = valid_from
         if valid_until is not None:
@@ -110,7 +131,7 @@ class ValidPayClient:
                 details=data,
             )
 
-        return CreateIntentResult(retrieval_id=retrieval_id, key=key)
+        return CreateIntentResult(retrieval_id=retrieval_id, key=result_key)
 
     def create_intent_batch(
         self,
@@ -200,6 +221,32 @@ class ValidPayClient:
             out.append(CreateIntentResult(retrieval_id=retrieval_id, key=keys[i]))
         return out
 
+    def _fetch_fragment_b(self, retrieval_id: str) -> str:
+        """Fetch Share B from the public fragment endpoint (Patent C)."""
+        fragment_data = self._request(
+            "GET",
+            f"/v1/intent/{quote(retrieval_id, safe='')}/fragment",
+            auth=False,
+        )
+        if isinstance(fragment_data, dict) and fragment_data.get("error"):
+            raise ValidPayError(
+                str(fragment_data.get("error")),
+                f"Fragment retrieval failed: {fragment_data.get('error')}",
+                details=fragment_data,
+            )
+        share_b = (
+            fragment_data.get("fragment_b")
+            if isinstance(fragment_data, dict)
+            else None
+        )
+        if not share_b:
+            raise ValidPayError(
+                "missing_fragment",
+                "Server did not return key fragment",
+                details=fragment_data,
+            )
+        return share_b
+
     def verify_intent(
         self,
         retrieval_id: str,
@@ -258,15 +305,12 @@ class ValidPayClient:
                 "Use verify_selective_intent(retrieval_id, key, role) instead of verify_intent().",
             )
 
-        # Split-Key Verification (Patent C). The caller passed a single key,
-        # but this intent was issued with a key split into two shares —
-        # verify_intent doesn't have enough information to reconstruct.
+        # Split-Key Verification (Patent C). Since 1.1.0 split-key is the
+        # default issue path, so the key the caller holds is Share A —
+        # fetch Share B from the fragment endpoint and XOR-combine, so
+        # create_intent -> verify_intent round-trips keep working.
         if data.get("split_key"):
-            raise ValidPayError(
-                "split_key_required",
-                f"Intent {retrieval_id} uses split-key protection. "
-                "Use verify_split_key_intent(retrieval_id, share_a) instead of verify_intent().",
-            )
+            key = combine_key_shares(key, self._fetch_fragment_b(retrieval_id))
 
         decrypted = decrypt(data["encrypted_payload"], key)
 
@@ -319,63 +363,26 @@ class ValidPayClient:
         valid_from: Optional[str] = None,
         valid_until: Optional[str] = None,
     ) -> CreateIntentResult:
-        """Create an intent with split-key protection (Patent C).
+        """Deprecated alias for :meth:`create_intent` (since SDK 1.1.0).
 
-        The AES-256 key is split into two XOR shares. Share A is returned
-        to the caller (for embedding in the QR code). Share B is stored on
-        the ValidPay server. Neither share alone can decrypt the payload —
-        both are required at verification time.
-
-        The full key exists only transiently in this process; it is never
-        persisted, never sent over the wire, and never logged.
-
-        Args:
-            document_type: A short string identifying the document kind.
-            payload: Any JSON-serializable object.
-
-        Returns:
-            A :class:`CreateIntentResult` whose ``key`` is **Share A**, not
-            the full key. Embed it in the QR code as you would the regular key.
+        Split-key protection (Patent C) is the default for
+        ``create_intent`` now, so this method adds nothing. It is kept so
+        1.0.x code keeps working; new code should call ``create_intent``.
         """
-        if not document_type:
-            raise ValidPayError("invalid_argument", "document_type is required")
-        _validate_time_lock(valid_from, valid_until)
-
-        full_key = generate_key()
-        share_a, share_b = split_key_fn(full_key)
-
-        plaintext = json.dumps(payload)
-        commitment_hash = compute_commitment_hash(plaintext)
-        encrypted_payload = encrypt(plaintext, full_key)
-
-        body: Dict[str, Any] = {
-            "document_type": document_type,
-            "encrypted_payload": encrypted_payload,
-            "commitment_hash": commitment_hash,
-            "split_key": True,
-            "key_fragment_b": share_b,
-        }
-        if valid_from is not None:
-            body["valid_from"] = valid_from
-        if valid_until is not None:
-            body["valid_until"] = valid_until
-
-        data = self._request(
-            "POST",
-            "/v1/intent",
-            body=body,
-            auth=True,
+        warnings.warn(
+            "create_split_key_intent() is deprecated since validpay 1.1.0: "
+            "create_intent() uses split-key protection by default. Call "
+            "create_intent() instead.",
+            DeprecationWarning,
+            stacklevel=2,
         )
-
-        retrieval_id = data.get("retrieval_id") if isinstance(data, dict) else None
-        if not retrieval_id:
-            raise ValidPayError(
-                "invalid_response",
-                "API response missing retrieval_id",
-                details=data,
-            )
-
-        return CreateIntentResult(retrieval_id=retrieval_id, key=share_a)
+        return self.create_intent(
+            document_type,
+            payload,
+            valid_from=valid_from,
+            valid_until=valid_until,
+            split_key=True,
+        )
 
     def verify_split_key_intent(
         self,
@@ -425,28 +432,7 @@ class ValidPayClient:
                 },
             )
 
-        fragment_data = self._request(
-            "GET",
-            f"/v1/intent/{quote(retrieval_id, safe='')}/fragment",
-            auth=False,
-        )
-        if isinstance(fragment_data, dict) and fragment_data.get("error"):
-            raise ValidPayError(
-                str(fragment_data.get("error")),
-                f"Fragment retrieval failed: {fragment_data.get('error')}",
-                details=fragment_data,
-            )
-        share_b = (
-            fragment_data.get("fragment_b")
-            if isinstance(fragment_data, dict)
-            else None
-        )
-        if not share_b:
-            raise ValidPayError(
-                "missing_fragment",
-                "Server did not return key fragment",
-                details=fragment_data,
-            )
+        share_b = self._fetch_fragment_b(retrieval_id)
 
         full_key = combine_key_shares(share_a, share_b)
         decrypted = decrypt(data["encrypted_payload"], full_key)

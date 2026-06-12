@@ -56,6 +56,9 @@ def test_requires_api_key():
 
 
 def test_create_intent_encrypts_locally_and_never_sends_key():
+    """Since 1.1.0 create_intent defaults to split-key: the result key is
+    Share A, Share B travels to the server, and neither the full key nor
+    the plaintext ever appears on the wire."""
     session = _FakeSession([
         _FakeResponse(201, {"retrieval_id": "vp_abc123def456", "status": "active"}),
     ])
@@ -82,12 +85,41 @@ def test_create_intent_encrypts_locally_and_never_sends_key():
     sent_body = json.loads(call["data"])
     assert sent_body["document_type"] == "ssn_card"
     assert isinstance(sent_body["encrypted_payload"], str)
+    assert sent_body["split_key"] is True
+    assert isinstance(sent_body["key_fragment_b"], str)
 
     full_call = json.dumps(call)
-    assert result.key not in full_call
+    assert result.key not in full_call  # Share A never sent
     assert "123-45-6789" not in full_call
     assert "Jane Doe" not in full_call
 
+    # Share A (returned) XOR Share B (sent) reconstructs the full key.
+    full_key = combine_key_shares(result.key, sent_body["key_fragment_b"])
+    assert full_key not in full_call  # full key never on the wire either
+    decrypted = json.loads(decrypt(sent_body["encrypted_payload"], full_key))
+    assert decrypted == payload
+
+
+def test_create_intent_split_key_false_is_legacy_full_key():
+    """split_key=False preserves the 1.0.x behavior: no fragment fields,
+    and the returned key decrypts the payload directly."""
+    session = _FakeSession([
+        _FakeResponse(201, {"retrieval_id": "vp_legacy1", "status": "active"}),
+    ])
+    client = ValidPayClient(
+        api_key="test_key",
+        base_url="https://api.example.test",
+        session=session,
+    )
+
+    payload = {"amount": "100.00"}
+    result = client.create_intent(
+        document_type="check", payload=payload, split_key=False,
+    )
+
+    sent_body = json.loads(session.calls[0]["data"])
+    assert "split_key" not in sent_body
+    assert "key_fragment_b" not in sent_body
     decrypted = json.loads(decrypt(sent_body["encrypted_payload"], result.key))
     assert decrypted == payload
 
@@ -584,24 +616,38 @@ def test_split_key_round_trip():
     assert "Authorization" not in fragment_call["headers"]
 
 
-def test_verify_intent_rejects_split_key_with_split_key_required():
-    real_key = generate_key()
-    blob = encrypt(json.dumps({"x": 1}), real_key)
-    session = _FakeSession([
+def test_verify_intent_delegates_to_split_key_flow():
+    """Since 1.1.0 verify_intent treats the key as Share A on a split-key
+    intent and transparently runs the split-key flow, so the natural
+    create_intent -> verify_intent round trip works."""
+    payload = {"x": 1}
+
+    create_session = _FakeSession([
+        _FakeResponse(201, {"retrieval_id": "vp_sk_3", "status": "active", "split_key": True}),
+    ])
+    creator = ValidPayClient(api_key="k", base_url="https://api.example.test", session=create_session)
+    create_result = creator.create_intent(document_type="check", payload=payload)
+    sent_body = json.loads(create_session.calls[0]["data"])
+
+    verify_session = _FakeSession([
         _FakeResponse(200, {
             "intent_id": "vp_sk_3",
-            "encrypted_payload": blob,
+            "encrypted_payload": sent_body["encrypted_payload"],
             "issuer": "Acme",
             "issuer_verified": True,
             "registered_at": "2026-05-02T00:00:00.000Z",
             "status": "active",
             "split_key": True,
+            "commitment_hash": sent_body["commitment_hash"],
         }),
+        _FakeResponse(200, {"intent_id": "vp_sk_3", "fragment_b": sent_body["key_fragment_b"]}),
     ])
-    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
-    with pytest.raises(ValidPayError) as exc:
-        client.verify_intent(retrieval_id="vp_sk_3", key=real_key)
-    assert exc.value.code == "split_key_required"
+    verifier = ValidPayClient(api_key="k", base_url="https://api.example.test", session=verify_session)
+    result = verifier.verify_intent(retrieval_id="vp_sk_3", key=create_result.key)
+    assert result.payload == payload
+    assert result.integrity_verified is True
+    # The delegation fetched the fragment endpoint.
+    assert verify_session.calls[1]["url"].endswith("/v1/intent/vp_sk_3/fragment")
 
 
 def test_verify_split_key_intent_revoked_raises():
