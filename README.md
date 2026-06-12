@@ -33,12 +33,15 @@ client = ValidPayClient(api_key="vp_live_xxx")
 
 # Create a single intent — the payload is encrypted locally before
 # anything leaves your process. Only the ciphertext is sent to ValidPay.
+# Split-key protection (Patent C) is the default since 1.1.0: result.key
+# is Share A of the AES key; Share B lives on the ValidPay server. The
+# full decryption key never exists on any single system.
 result = client.create_intent(
     document_type="check",
     payload={"payee": "John Doe", "amount": 1500.00, "check_number": "10042"},
 )
 print(result.retrieval_id)  # vp_abc123def456
-print(result.key)           # base64 AES-256 key — deliver out-of-band
+print(result.key)           # base64 key Share A — embed in the QR / deliver out-of-band
 
 # Create up to 100 intents in one round trip.
 results = client.create_intent_batch([
@@ -87,25 +90,36 @@ timestamps but never enforces them; this preserves the blind intermediary
 model (the server never decides whether a document is "still good").
 
 The same `valid_from` / `valid_until` keyword arguments are accepted by
-`create_intent_batch` (per-item), `create_split_key_intent`, and
-`create_selective_intent`.
+`create_intent_batch` (per-item) and `create_selective_intent`.
 
-### Split-key intents (Patent C)
+### Split-key intents (Patent C) — the default
 
-Splits the AES key into two XOR shares: Share A is returned to the caller
-(typically embedded in the QR code), Share B is stored server-side. Neither
-share alone can decrypt the payload.
+All documents created with SDK v1.1+ use split-key by default: the AES
+key is split into two XOR shares — Share A is returned to the caller
+(typically embedded in the QR code), Share B is stored server-side.
+Neither share alone can decrypt the payload, so the full decryption key
+never exists on any single system.
 
 ```python
-result = client.create_split_key_intent(
+result = client.create_intent(
     document_type="ssn_card",
     payload={"ssn": "123-45-6789"},
 )
-# result.key is Share A — pair it with Share B at verification time.
+# result.key is Share A — verify_intent pairs it with Share B automatically.
 
-verified = client.verify_split_key_intent(result.retrieval_id, result.key)
+verified = client.verify_intent(result.retrieval_id, result.key)
 print(verified.payload)
 ```
+
+#### Backward compatibility
+
+- `create_intent(..., split_key=False)` gives the legacy single-key flow
+  (the returned `key` is the full AES key).
+- `create_split_key_intent()` is a deprecated alias for `create_intent()`
+  — 1.0.x code keeps working, with a `DeprecationWarning`.
+- `verify_intent` detects legacy vs split-key intents from the API
+  response, so it verifies both; `verify_split_key_intent()` also still
+  works.
 
 ### Selective disclosure (Patent E)
 
@@ -151,12 +165,15 @@ for event in history:
 - `session` — optionally provide a `requests.Session` for connection
   pooling, custom adapters, or mocking in tests.
 
-### `client.create_intent(document_type, payload) -> CreateIntentResult`
+### `client.create_intent(document_type, payload, *, split_key=True) -> CreateIntentResult`
 
 Encrypts `payload` (any JSON-serializable value) under a freshly
 generated AES-256 key and registers it with ValidPay. Returns the
-retrieval id and the key. **The key is never sent to ValidPay** — you
-must hand it off out-of-band to whoever needs to verify the intent.
+retrieval id and the key material: **Share A** of the split key by
+default (Share B goes to the server; neither alone decrypts), or the
+full AES key with `split_key=False`. **The full key is never sent to
+ValidPay** — hand the returned key off out-of-band to whoever needs to
+verify the intent.
 
 ### `client.create_intent_batch(intents) -> list[CreateIntentResult]`
 

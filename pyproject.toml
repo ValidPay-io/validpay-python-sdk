@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "validpay"
-version = "1.0.1"
+version = "1.1.0"
 description = "Official ValidPay Python SDK — client-side AES-256-GCM encryption + ValidPay API client"
 readme = "README.md"
 license = { file = "LICENSE" }
