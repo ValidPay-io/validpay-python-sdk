@@ -75,16 +75,20 @@ def combine_key_shares(share_a: str, share_b: str) -> str:
     return base64.b64encode(key_bytes).decode("ascii")
 
 
-def compute_commitment_hash(plaintext: str) -> str:
-    """SHA-256 commitment hash of the plaintext payload (Hybrid Commitment Scheme).
+def compute_commitment_hash(ciphertext_b64: str) -> str:
+    """SHA-256 commitment hash over the *ciphertext* blob (commitment v2).
 
-    Computed at issuance and stored alongside the ciphertext on the server.
-    At verification time, the same hash is recomputed against the freshly
-    decrypted plaintext; a mismatch proves the server tampered with or
-    swapped the ciphertext, since SHA-256 is one-way and the server cannot
-    forge a matching hash without the decryption key.
+    Pass the base64 ValidPay wire blob returned by :func:`encrypt` — NOT the
+    plaintext. Hashing the ciphertext lets the server publish the commitment
+    on the public verify endpoint without creating a confirmation oracle:
+    SHA-256(plaintext) over a low-entropy structured document (a check, an
+    SSN card) can be brute-forced offline to recover contents without the
+    key, which broke the "we cannot read your documents" promise (Prompt 097
+    C-1). The commitment still proves the server hasn't swapped the blob
+    between issuance and verification — the verifier recomputes
+    SHA-256(ciphertext) and compares.
     """
-    return hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+    return hashlib.sha256(ciphertext_b64.encode("utf-8")).hexdigest()
 
 
 def _decode_key(key: str) -> bytes:

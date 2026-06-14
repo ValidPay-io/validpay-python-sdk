@@ -294,7 +294,7 @@ def test_create_intent_batch_rejects_malformed_items():
         client.create_intent_batch([{"document_type": "t"}])  # missing payload
 
 
-def test_create_intent_sends_commitment_hash_matching_plaintext():
+def test_create_intent_sends_commitment_hash_over_ciphertext():
     session = _FakeSession([
         _FakeResponse(201, {"retrieval_id": "vp_h", "status": "active"}),
     ])
@@ -304,8 +304,9 @@ def test_create_intent_sends_commitment_hash_matching_plaintext():
     client.create_intent(document_type="check", payload=payload)
 
     sent = json.loads(session.calls[0]["data"])
-    expected_hash = compute_commitment_hash(json.dumps(payload))
-    assert sent["commitment_hash"] == expected_hash
+    # C-1: the commitment is SHA-256 of the ciphertext blob, NOT the plaintext.
+    assert sent["commitment_hash"] == compute_commitment_hash(sent["encrypted_payload"])
+    assert sent["commitment_hash"] != compute_commitment_hash(json.dumps(payload))
     assert len(sent["commitment_hash"]) == 64
 
 
@@ -327,21 +328,25 @@ def test_create_intent_batch_includes_per_item_commitment_hash():
         {"document_type": "check", "payload": payloads[1]},
     ])
     sent = json.loads(session.calls[0]["data"])["intents"]
-    assert sent[0]["commitment_hash"] == compute_commitment_hash(json.dumps(payloads[0]))
-    assert sent[1]["commitment_hash"] == compute_commitment_hash(json.dumps(payloads[1]))
+    # C-1: per-item commitment is over each item's ciphertext blob.
+    assert sent[0]["commitment_hash"] == compute_commitment_hash(sent[0]["encrypted_payload"])
+    assert sent[1]["commitment_hash"] == compute_commitment_hash(sent[1]["encrypted_payload"])
 
 
 def test_verify_intent_with_matching_commitment_hash_sets_integrity_verified():
     real_key = generate_key()
     plaintext = json.dumps({"amount": 1500})
     blob = encrypt(plaintext, real_key)
-    commitment_hash = compute_commitment_hash(plaintext)
+    # C-1: commitment v2 is over the ciphertext, and the response must carry
+    # commitment_version >= 2 for the verifier to enforce it.
+    commitment_hash = compute_commitment_hash(blob)
 
     session = _FakeSession([
         _FakeResponse(200, {
             "intent_id": "vp_int_1",
             "encrypted_payload": blob,
             "commitment_hash": commitment_hash,
+            "commitment_version": 2,
             "issuer": "Acme",
             "issuer_verified": True,
             "registered_at": "2026-05-02T00:00:00.000Z",
@@ -366,6 +371,7 @@ def test_verify_intent_with_mismatched_commitment_hash_raises_integrity_failure(
             "intent_id": "vp_int_2",
             "encrypted_payload": blob,
             "commitment_hash": bad_hash,
+            "commitment_version": 2,
             "issuer": "Acme",
             "issuer_verified": True,
             "registered_at": "2026-05-02T00:00:00.000Z",
@@ -376,6 +382,32 @@ def test_verify_intent_with_mismatched_commitment_hash_raises_integrity_failure(
     with pytest.raises(ValidPayError) as exc:
         client.verify_intent(retrieval_id="vp_int_2", key=real_key)
     assert exc.value.code == "integrity_failure"
+
+
+def test_verify_intent_legacy_v1_commitment_is_skipped():
+    # A v1 (or version-less) commitment over plaintext must NOT be enforced —
+    # it's the confirmation-oracle risk C-1 fixes. Integrity stays False and
+    # verification still succeeds so legacy QR codes keep working.
+    real_key = generate_key()
+    plaintext = json.dumps({"amount": 1500})
+    blob = encrypt(plaintext, real_key)
+
+    session = _FakeSession([
+        _FakeResponse(200, {
+            "intent_id": "vp_v1",
+            "encrypted_payload": blob,
+            "commitment_hash": compute_commitment_hash(plaintext),  # legacy plaintext hash
+            "commitment_version": 1,
+            "issuer": "Acme",
+            "issuer_verified": True,
+            "registered_at": "2026-05-02T00:00:00.000Z",
+            "status": "active",
+        }),
+    ])
+    client = ValidPayClient(api_key="k", base_url="https://api.example.test", session=session)
+    result = client.verify_intent(retrieval_id="vp_v1", key=real_key)
+    assert result.integrity_verified is False
+    assert result.payload == {"amount": 1500}
 
 
 def test_verify_intent_legacy_intent_without_commitment_hash_passes_with_integrity_false():
@@ -600,6 +632,7 @@ def test_split_key_round_trip():
             "status": "active",
             "split_key": True,
             "commitment_hash": captured_body["commitment_hash"],
+            "commitment_version": 2,
         }),
         _FakeResponse(200, {"intent_id": "vp_sk_2", "fragment_b": fragment_b}),
     ])
@@ -639,6 +672,7 @@ def test_verify_intent_delegates_to_split_key_flow():
             "status": "active",
             "split_key": True,
             "commitment_hash": sent_body["commitment_hash"],
+            "commitment_version": 2,
         }),
         _FakeResponse(200, {"intent_id": "vp_sk_3", "fragment_b": sent_body["key_fragment_b"]}),
     ])
@@ -797,10 +831,12 @@ def _build_selective_intent_response(payload: dict, policy: dict, *, intent_id: 
     encrypted_fields, field_keys = encrypt_fields(payload)
     key_map = build_key_map(field_keys, policy)
     encrypted_key_map = encrypt(json.dumps(key_map), master_key)
-    commitment_hash = compute_commitment_hash(json.dumps(payload))
+    envelope = json.dumps(encrypted_fields)
+    # C-1: commitment v2 is over the ciphertext envelope, role-independent.
+    commitment_hash = compute_commitment_hash(envelope)
     response = {
         "intent_id": intent_id,
-        "encrypted_payload": json.dumps(encrypted_fields),
+        "encrypted_payload": envelope,
         "issuer": "Acme",
         "issuer_verified": True,
         "registered_at": "2026-05-02T00:00:00.000Z",
@@ -810,6 +846,7 @@ def _build_selective_intent_response(payload: dict, policy: dict, *, intent_id: 
         "disclosure_policy": json.dumps(policy),
         "encrypted_key_map": encrypted_key_map,
         "commitment_hash": commitment_hash,
+        "commitment_version": 2,
     }
     return master_key, response
 
@@ -845,8 +882,10 @@ def test_verify_selective_intent_partial_role_redacts():
     assert result.payload["amount"] == 100
     assert result.payload["name"] == "[REDACTED]"
     assert result.payload["ssn"] == "[REDACTED]"
-    # Integrity check only runs for "full" role.
-    assert result.integrity_verified is False
+    # C-1: the commitment is over the ciphertext envelope, so integrity is
+    # now verified for ANY role — not just "full" (it no longer needs the
+    # decrypted plaintext).
+    assert result.integrity_verified is True
 
 
 def test_verify_selective_intent_invalid_role_raises():
@@ -906,6 +945,7 @@ def test_create_selective_intent_with_split_key():
             "disclosure_policy": sent["disclosure_policy"],
             "encrypted_key_map": sent["encrypted_key_map"],
             "commitment_hash": sent["commitment_hash"],
+            "commitment_version": 2,
         }),
         _FakeResponse(200, {"intent_id": "vp_sel_sk", "fragment_b": sent["key_fragment_b"]}),
     ])
