@@ -14,6 +14,7 @@ from .binding import (
 )
 from .client import ValidPayClient
 from .crypto import (
+    build_aad,
     build_key_map,
     combine_key_shares,
     compute_commitment_hash,
@@ -37,6 +38,7 @@ __all__ = [
     "encrypt",
     "decrypt",
     "compute_commitment_hash",
+    "build_aad",
     "split_key",
     "combine_key_shares",
     "encrypt_fields",
