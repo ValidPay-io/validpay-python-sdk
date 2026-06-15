@@ -27,6 +27,29 @@ DEFAULT_BASE_URL = "https://api.validpay.com"
 DEFAULT_TIMEOUT = 30.0
 
 
+def _verify_commitment(data: Mapping[str, Any]) -> bool:
+    """Version-aware commitment check (Prompt 097 C-1).
+
+    v2 commitments are SHA-256(ciphertext): recompute over the received
+    ``encrypted_payload`` and compare. v1 (legacy SHA-256(plaintext)) is a
+    confirmation-oracle risk and is intentionally skipped — those documents
+    expire naturally. Returns whether integrity was confirmed; raises on a
+    v2 mismatch (the ciphertext was swapped after issuance).
+    """
+    commitment_hash = data.get("commitment_hash")
+    version = data.get("commitment_version", 1)
+    if not commitment_hash or not isinstance(version, int) or version < 2:
+        return False
+    if compute_commitment_hash(data["encrypted_payload"]) != commitment_hash:
+        raise ValidPayError(
+            "integrity_failure",
+            "INTEGRITY VERIFICATION FAILED — the ciphertext does not match the "
+            "commitment hash recorded at issuance. This document may have been "
+            "tampered with.",
+        )
+    return True
+
+
 class ValidPayClient:
     """Client for the ValidPay API.
 
@@ -100,8 +123,9 @@ class ValidPayClient:
             result_key, share_b = split_key_fn(full_key)
 
         plaintext = json.dumps(payload)
-        commitment_hash = compute_commitment_hash(plaintext)
         encrypted_payload = encrypt(plaintext, full_key)
+        # Commitment v2: hash the ciphertext, not the plaintext (C-1).
+        commitment_hash = compute_commitment_hash(encrypted_payload)
 
         body: Dict[str, Any] = {
             "document_type": document_type,
@@ -183,10 +207,12 @@ class ValidPayClient:
             key = generate_key()
             keys.append(key)
             plaintext = json.dumps(item["payload"])
+            encrypted_payload = encrypt(plaintext, key)
             req_item: Dict[str, Any] = {
                 "document_type": doc_type,
-                "encrypted_payload": encrypt(plaintext, key),
-                "commitment_hash": compute_commitment_hash(plaintext),
+                "encrypted_payload": encrypted_payload,
+                # Commitment v2: hash the ciphertext, not the plaintext (C-1).
+                "commitment_hash": compute_commitment_hash(encrypted_payload),
             }
             if valid_from is not None:
                 req_item["valid_from"] = valid_from
@@ -312,23 +338,12 @@ class ValidPayClient:
         if data.get("split_key"):
             key = combine_key_shares(key, self._fetch_fragment_b(retrieval_id))
 
-        decrypted = decrypt(data["encrypted_payload"], key)
+        # Commitment check over the ciphertext (C-1) — proves the server
+        # hasn't swapped the blob. Done before decryption since it no longer
+        # needs the plaintext. Legacy v1 intents skip this check.
+        integrity_verified = _verify_commitment(data)
 
-        # Hybrid Commitment Scheme — proves the server hasn't swapped the
-        # ciphertext. Server is blind so it can't forge a matching hash.
-        # Legacy intents (no hash stored) still verify, just without this check.
-        commitment_hash = data.get("commitment_hash")
-        integrity_verified = False
-        if commitment_hash:
-            actual_hash = compute_commitment_hash(decrypted)
-            if actual_hash != commitment_hash:
-                raise ValidPayError(
-                    "integrity_failure",
-                    "INTEGRITY VERIFICATION FAILED — the decrypted payload does not match "
-                    "the commitment hash stored at issuance. This may indicate server-side "
-                    "tampering or payload corruption.",
-                )
-            integrity_verified = True
+        decrypted = decrypt(data["encrypted_payload"], key)
 
         try:
             payload = json.loads(decrypted)
@@ -434,20 +449,11 @@ class ValidPayClient:
 
         share_b = self._fetch_fragment_b(retrieval_id)
 
+        # Commitment check over the ciphertext (C-1); legacy v1 skips.
+        integrity_verified = _verify_commitment(data)
+
         full_key = combine_key_shares(share_a, share_b)
         decrypted = decrypt(data["encrypted_payload"], full_key)
-
-        commitment_hash = data.get("commitment_hash")
-        integrity_verified = False
-        if commitment_hash:
-            actual_hash = compute_commitment_hash(decrypted)
-            if actual_hash != commitment_hash:
-                raise ValidPayError(
-                    "integrity_failure",
-                    "INTEGRITY VERIFICATION FAILED — the decrypted payload does not match "
-                    "the commitment hash stored at issuance.",
-                )
-            integrity_verified = True
 
         try:
             payload = json.loads(decrypted)
@@ -529,9 +535,11 @@ class ValidPayClient:
         key_map = build_key_map(field_keys, disclosure_policy)
         encrypted_key_map = encrypt(json.dumps(key_map), master_key)
 
-        full_plaintext = json.dumps(payload)
-        commitment_hash = compute_commitment_hash(full_plaintext)
         envelope = json.dumps(encrypted_fields)
+        # Commitment v2: hash the transported ciphertext envelope, not the
+        # plaintext (C-1). Role-independent — the server hashes this exact
+        # string and the verifier recomputes it.
+        commitment_hash = compute_commitment_hash(envelope)
 
         qr_key = master_key
         key_fragment_b: Optional[str] = None
@@ -678,20 +686,10 @@ class ValidPayClient:
 
         payload = decrypt_fields(encrypted_fields, field_keys)
 
-        integrity_verified = False
-        commitment_hash = data.get("commitment_hash")
-        if commitment_hash and role == "full":
-            all_keys = key_map.get("full", {})
-            full_payload = decrypt_fields(encrypted_fields, all_keys)
-            full_plaintext = json.dumps(full_payload)
-            actual_hash = compute_commitment_hash(full_plaintext)
-            if actual_hash != commitment_hash:
-                raise ValidPayError(
-                    "integrity_failure",
-                    "INTEGRITY VERIFICATION FAILED — the decrypted payload does not match "
-                    "the commitment hash stored at issuance.",
-                )
-            integrity_verified = True
+        # Commitment over the ciphertext envelope (C-1) — role-independent
+        # now, since it no longer requires decrypting the full payload.
+        # Legacy v1 intents skip this check.
+        integrity_verified = _verify_commitment(data)
 
         valid_from_str = data.get("valid_from")
         valid_until_str = data.get("valid_until")
