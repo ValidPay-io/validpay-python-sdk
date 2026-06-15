@@ -140,6 +140,38 @@ def test_commitment_hash_changes_with_input():
     assert compute_commitment_hash("a") != compute_commitment_hash("b")
 
 
+def test_aad_round_trip():
+    from validpay.crypto import build_aad, decrypt, encrypt, generate_key
+
+    key = generate_key()
+    aad = build_aad("check", None, "2026-08-01T00:00:00Z")
+    blob = encrypt('{"amount": 100}', key, aad)
+    assert decrypt(blob, key, aad) == '{"amount": 100}'
+
+
+def test_aad_mismatch_fails():
+    from validpay.crypto import ValidPayError, build_aad, decrypt, encrypt, generate_key
+    import pytest
+
+    key = generate_key()
+    blob = encrypt('{"amount": 100}', key, build_aad("check"))
+    # Altered document_type → GCM tag check fails.
+    with pytest.raises(ValidPayError) as exc:
+        decrypt(blob, key, build_aad("other"))
+    assert exc.value.code == "decryption_failed"
+
+
+def test_aad_is_canonical_compact_with_epoch_ms():
+    from validpay.crypto import build_aad
+
+    # Compact (no spaces), fixed key order, epoch-ms timestamps — must stay
+    # byte-identical to the JS SDKs / website verifier.
+    assert (
+        build_aad("check", None, "2026-08-01T00:00:00Z")
+        == '{"document_type":"check","valid_from":null,"valid_until":1785542400000}'
+    )
+
+
 def test_split_key_produces_two_32_byte_shares():
     key = generate_key()
     a, b = split_key(key)

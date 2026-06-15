@@ -104,26 +104,36 @@ def _decode_key(key: str) -> bytes:
     return buf
 
 
-def encrypt(plaintext: str, key: str) -> str:
+def encrypt(plaintext: str, key: str, aad: str | None = None) -> str:
     """Encrypt ``plaintext`` (UTF-8) with the given base64 AES-256 key.
 
     Returns a base64 string in the ValidPay wire format::
 
         base64(iv[12] || authTag[16] || ciphertext)
+
+    ``aad`` (Prompt 097 M-5) is optional Associated Authenticated Data — when
+    supplied, the same string MUST be passed to :func:`decrypt` or the GCM tag
+    check fails. Use :func:`build_aad` to bind document metadata.
     """
     key_bytes = _decode_key(key)
     iv = os.urandom(_IV_BYTES)
     aesgcm = AESGCM(key_bytes)
+    aad_bytes = aad.encode("utf-8") if aad else None
     # cryptography's AESGCM.encrypt returns ``ciphertext || authTag``.
     # Rearrange to match the ValidPay/Node wire format: iv || authTag || ciphertext.
-    ct_with_tag = aesgcm.encrypt(iv, plaintext.encode("utf-8"), None)
+    ct_with_tag = aesgcm.encrypt(iv, plaintext.encode("utf-8"), aad_bytes)
     auth_tag = ct_with_tag[-_TAG_BYTES:]
     ciphertext = ct_with_tag[:-_TAG_BYTES]
     return base64.b64encode(iv + auth_tag + ciphertext).decode("ascii")
 
 
-def decrypt(blob: str, key: str) -> str:
-    """Decrypt a ValidPay-format base64 blob and return the plaintext (UTF-8)."""
+def decrypt(blob: str, key: str, aad: str | None = None) -> str:
+    """Decrypt a ValidPay-format base64 blob and return the plaintext (UTF-8).
+
+    ``aad`` must match the value passed to :func:`encrypt` (Prompt 097 M-5);
+    a mismatch (e.g. a server that altered the bound metadata) raises
+    ``decryption_failed``.
+    """
     key_bytes = _decode_key(key)
 
     try:
@@ -142,15 +152,54 @@ def decrypt(blob: str, key: str) -> str:
     ciphertext = buf[_IV_BYTES + _TAG_BYTES:]
 
     aesgcm = AESGCM(key_bytes)
+    aad_bytes = aad.encode("utf-8") if aad else None
     try:
-        plaintext = aesgcm.decrypt(iv, ciphertext + auth_tag, None)
+        plaintext = aesgcm.decrypt(iv, ciphertext + auth_tag, aad_bytes)
     except InvalidTag as exc:
         raise ValidPayError(
             "decryption_failed",
-            "Decryption failed — wrong key or tampered blob",
+            "Decryption failed — wrong key, tampered blob, or altered bound metadata",
         ) from exc
 
     return plaintext.decode("utf-8")
+
+
+def build_aad(
+    document_type: str,
+    valid_from: str | None = None,
+    valid_until: str | None = None,
+) -> str:
+    """Canonical AAD for AES-GCM metadata binding (Prompt 097 M-5).
+
+    Binds ``document_type`` and the validity window so a blind/compromised
+    server cannot silently alter them (e.g. change "check" to "other"). The
+    output MUST be byte-identical across every SDK and the website verifier,
+    so:
+
+      - keys are emitted in a fixed order (document_type, valid_from, valid_until);
+      - JSON is compact (no spaces) — matches JS ``JSON.stringify``;
+      - timestamps are normalized to **epoch milliseconds** rather than raw
+        ISO strings. The server reformats timestamps (``2026-08-01T00:00:00Z``
+        becomes ``...:00.000Z``), so binding the raw string would break
+        verification of legitimate time-locked documents. Epoch ms parse
+        identically on both sides regardless of ISO formatting.
+    """
+    payload = {
+        "document_type": document_type,
+        "valid_from": _epoch_ms(valid_from),
+        "valid_until": _epoch_ms(valid_until),
+    }
+    return json.dumps(payload, separators=(",", ":"))
+
+
+def _epoch_ms(iso: str | None) -> int | None:
+    if not iso:
+        return None
+    from datetime import datetime
+
+    # Accept the trailing 'Z' (UTC) that fromisoformat rejected before 3.11.
+    parsed = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    return int(parsed.timestamp() * 1000)
 
 
 def encrypt_fields(payload: dict, generate_key_fn=None) -> tuple[dict, dict]:

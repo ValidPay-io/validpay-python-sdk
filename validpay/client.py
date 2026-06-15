@@ -10,6 +10,7 @@ import requests
 from ._timelock import compute_time_lock_status as _compute_time_lock_status
 from ._timelock import validate_time_lock as _validate_time_lock
 from .crypto import (
+    build_aad,
     build_key_map,
     combine_key_shares,
     compute_commitment_hash,
@@ -48,6 +49,19 @@ def _verify_commitment(data: Mapping[str, Any]) -> bool:
             "tampered with.",
         )
     return True
+
+
+def _aad_for(data: Mapping[str, Any]) -> Optional[str]:
+    """AAD to pass to decrypt (Prompt 097 M-5). For v2 intents, reconstruct it
+    from the server-returned metadata so a server that altered document_type
+    or the validity window fails the GCM tag check. None for legacy v1."""
+    if not isinstance(data.get("encryption_version"), int) or data["encryption_version"] < 2:
+        return None
+    return build_aad(
+        data.get("document_type", ""),
+        data.get("valid_from"),
+        data.get("valid_until"),
+    )
 
 
 class ValidPayClient:
@@ -123,7 +137,9 @@ class ValidPayClient:
             result_key, share_b = split_key_fn(full_key)
 
         plaintext = json.dumps(payload)
-        encrypted_payload = encrypt(plaintext, full_key)
+        # M-5: bind document_type + validity window as AAD.
+        aad = build_aad(document_type, valid_from, valid_until)
+        encrypted_payload = encrypt(plaintext, full_key, aad)
         # Commitment v2: hash the ciphertext, not the plaintext (C-1).
         commitment_hash = compute_commitment_hash(encrypted_payload)
 
@@ -131,6 +147,7 @@ class ValidPayClient:
             "document_type": document_type,
             "encrypted_payload": encrypted_payload,
             "commitment_hash": commitment_hash,
+            "encryption_version": 2,
         }
         if split_key:
             body["split_key"] = True
@@ -207,12 +224,15 @@ class ValidPayClient:
             key = generate_key()
             keys.append(key)
             plaintext = json.dumps(item["payload"])
-            encrypted_payload = encrypt(plaintext, key)
+            # M-5: bind document_type + validity window as AAD per item.
+            aad = build_aad(doc_type, valid_from, valid_until)
+            encrypted_payload = encrypt(plaintext, key, aad)
             req_item: Dict[str, Any] = {
                 "document_type": doc_type,
                 "encrypted_payload": encrypted_payload,
                 # Commitment v2: hash the ciphertext, not the plaintext (C-1).
                 "commitment_hash": compute_commitment_hash(encrypted_payload),
+                "encryption_version": 2,
             }
             if valid_from is not None:
                 req_item["valid_from"] = valid_from
@@ -343,7 +363,9 @@ class ValidPayClient:
         # needs the plaintext. Legacy v1 intents skip this check.
         integrity_verified = _verify_commitment(data)
 
-        decrypted = decrypt(data["encrypted_payload"], key)
+        # M-5: pass the reconstructed AAD for v2 intents so altered metadata
+        # fails the GCM tag check.
+        decrypted = decrypt(data["encrypted_payload"], key, _aad_for(data))
 
         try:
             payload = json.loads(decrypted)
@@ -453,7 +475,8 @@ class ValidPayClient:
         integrity_verified = _verify_commitment(data)
 
         full_key = combine_key_shares(share_a, share_b)
-        decrypted = decrypt(data["encrypted_payload"], full_key)
+        # M-5: AAD bound for v2 intents.
+        decrypted = decrypt(data["encrypted_payload"], full_key, _aad_for(data))
 
         try:
             payload = json.loads(decrypted)

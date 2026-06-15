@@ -11,6 +11,7 @@ from validpay import (
     CreateIntentResult,
     ValidPayClient,
     ValidPayError,
+    build_aad,
     build_key_map,
     combine_key_shares,
     compute_commitment_hash,
@@ -96,7 +97,10 @@ def test_create_intent_encrypts_locally_and_never_sends_key():
     # Share A (returned) XOR Share B (sent) reconstructs the full key.
     full_key = combine_key_shares(result.key, sent_body["key_fragment_b"])
     assert full_key not in full_call  # full key never on the wire either
-    decrypted = json.loads(decrypt(sent_body["encrypted_payload"], full_key))
+    # M-5: the blob is AAD-bound, so pass the same AAD the create call used.
+    decrypted = json.loads(
+        decrypt(sent_body["encrypted_payload"], full_key, build_aad("ssn_card"))
+    )
     assert decrypted == payload
 
 
@@ -120,7 +124,10 @@ def test_create_intent_split_key_false_is_legacy_full_key():
     sent_body = json.loads(session.calls[0]["data"])
     assert "split_key" not in sent_body
     assert "key_fragment_b" not in sent_body
-    decrypted = json.loads(decrypt(sent_body["encrypted_payload"], result.key))
+    # M-5: create_intent binds AAD even for the legacy single-key flow.
+    decrypted = json.loads(
+        decrypt(sent_body["encrypted_payload"], result.key, build_aad("check"))
+    )
     assert decrypted == payload
 
 
@@ -273,8 +280,8 @@ def test_create_intent_batch_encrypts_each_payload_with_unique_key():
     assert results[0].key not in full_call
     assert results[1].key not in full_call
 
-    assert json.loads(decrypt(sent["intents"][0]["encrypted_payload"], results[0].key)) == inputs[0]["payload"]
-    assert json.loads(decrypt(sent["intents"][1]["encrypted_payload"], results[1].key)) == inputs[1]["payload"]
+    assert json.loads(decrypt(sent["intents"][0]["encrypted_payload"], results[0].key, build_aad(inputs[0]["document_type"]))) == inputs[0]["payload"]
+    assert json.loads(decrypt(sent["intents"][1]["encrypted_payload"], results[1].key, build_aad(inputs[1]["document_type"]))) == inputs[1]["payload"]
 
 
 def test_create_intent_batch_rejects_empty_and_oversized():
@@ -633,6 +640,10 @@ def test_split_key_round_trip():
             "split_key": True,
             "commitment_hash": captured_body["commitment_hash"],
             "commitment_version": 2,
+            # M-5: echo the fields the verifier rebuilds the AAD from. The
+            # create call bound build_aad("ssn_card", None, None).
+            "encryption_version": 2,
+            "document_type": "ssn_card",
         }),
         _FakeResponse(200, {"intent_id": "vp_sk_2", "fragment_b": fragment_b}),
     ])
@@ -673,6 +684,9 @@ def test_verify_intent_delegates_to_split_key_flow():
             "split_key": True,
             "commitment_hash": sent_body["commitment_hash"],
             "commitment_version": 2,
+            # M-5: verify reconstructs the AAD from these.
+            "encryption_version": 2,
+            "document_type": "check",
         }),
         _FakeResponse(200, {"intent_id": "vp_sk_3", "fragment_b": sent_body["key_fragment_b"]}),
     ])
@@ -746,7 +760,8 @@ def test_split_key_xor_relationship_holds_via_combine_helper():
     sent = json.loads(session.calls[0]["data"])
     full_key = combine_key_shares(result.key, sent["key_fragment_b"])
     # Decrypting with the recombined key should work — that's what the verifier does.
-    assert decrypt(sent["encrypted_payload"], full_key) == json.dumps({"amount": 1})
+    # M-5: the blob is AAD-bound, so pass the same AAD the create call used.
+    assert decrypt(sent["encrypted_payload"], full_key, build_aad("check")) == json.dumps({"amount": 1})
 
 
 def test_network_error_wrapped_as_validpay_error():
@@ -1134,15 +1149,19 @@ def test_verify_intent_no_time_lock():
 
 def test_verify_split_key_intent_time_lock():
     payload = {"a": 1}
+    # The validity window must be bound at creation (M-5 AAD), so compute it
+    # first and pass it to create; the verify response echoes the same window.
+    vf = _iso_in(-3600)
+    vu = _iso_in(3600)
     create_session = _FakeSession([
         _FakeResponse(201, {"retrieval_id": "vp_tl_sk", "status": "active", "split_key": True}),
     ])
     creator = ValidPayClient(api_key="k", base_url="https://api.example.test", session=create_session)
-    create_result = creator.create_split_key_intent(document_type="check", payload=payload)
+    create_result = creator.create_split_key_intent(
+        document_type="check", payload=payload, valid_from=vf, valid_until=vu
+    )
     sent = json.loads(create_session.calls[0]["data"])
 
-    vf = _iso_in(-3600)
-    vu = _iso_in(3600)
     verify_session = _FakeSession([
         _FakeResponse(200, {
             "intent_id": "vp_tl_sk",
@@ -1153,6 +1172,9 @@ def test_verify_split_key_intent_time_lock():
             "status": "active",
             "split_key": True,
             "commitment_hash": sent["commitment_hash"],
+            "commitment_version": 2,
+            "encryption_version": 2,
+            "document_type": "check",
             "valid_from": vf,
             "valid_until": vu,
         }),
