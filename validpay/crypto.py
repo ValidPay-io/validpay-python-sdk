@@ -104,6 +104,30 @@ def _decode_key(key: str) -> bytes:
     return buf
 
 
+def encrypt_bytes(plaintext: bytes, key: str, aad: str | None = None) -> str:
+    """Encrypt raw ``plaintext`` bytes with the given base64 AES-256 key.
+
+    Returns a base64 string in the ValidPay wire format::
+
+        base64(iv[12] || authTag[16] || ciphertext)
+
+    Use this for file mode (PDF/image/DOCX bytes); :func:`encrypt` is the
+    UTF-8 string convenience wrapper for structured payloads. ``aad`` (Prompt
+    097 M-5) is optional Associated Authenticated Data — when supplied, the
+    same string MUST be passed to :func:`decrypt` or the GCM tag check fails.
+    """
+    key_bytes = _decode_key(key)
+    iv = os.urandom(_IV_BYTES)
+    aesgcm = AESGCM(key_bytes)
+    aad_bytes = aad.encode("utf-8") if aad else None
+    # cryptography's AESGCM.encrypt returns ``ciphertext || authTag``.
+    # Rearrange to match the ValidPay/Node wire format: iv || authTag || ciphertext.
+    ct_with_tag = aesgcm.encrypt(iv, plaintext, aad_bytes)
+    auth_tag = ct_with_tag[-_TAG_BYTES:]
+    ciphertext = ct_with_tag[:-_TAG_BYTES]
+    return base64.b64encode(iv + auth_tag + ciphertext).decode("ascii")
+
+
 def encrypt(plaintext: str, key: str, aad: str | None = None) -> str:
     """Encrypt ``plaintext`` (UTF-8) with the given base64 AES-256 key.
 
@@ -115,24 +139,16 @@ def encrypt(plaintext: str, key: str, aad: str | None = None) -> str:
     supplied, the same string MUST be passed to :func:`decrypt` or the GCM tag
     check fails. Use :func:`build_aad` to bind document metadata.
     """
-    key_bytes = _decode_key(key)
-    iv = os.urandom(_IV_BYTES)
-    aesgcm = AESGCM(key_bytes)
-    aad_bytes = aad.encode("utf-8") if aad else None
-    # cryptography's AESGCM.encrypt returns ``ciphertext || authTag``.
-    # Rearrange to match the ValidPay/Node wire format: iv || authTag || ciphertext.
-    ct_with_tag = aesgcm.encrypt(iv, plaintext.encode("utf-8"), aad_bytes)
-    auth_tag = ct_with_tag[-_TAG_BYTES:]
-    ciphertext = ct_with_tag[:-_TAG_BYTES]
-    return base64.b64encode(iv + auth_tag + ciphertext).decode("ascii")
+    return encrypt_bytes(plaintext.encode("utf-8"), key, aad)
 
 
-def decrypt(blob: str, key: str, aad: str | None = None) -> str:
-    """Decrypt a ValidPay-format base64 blob and return the plaintext (UTF-8).
+def decrypt_bytes(blob: str, key: str, aad: str | None = None) -> bytes:
+    """Decrypt a ValidPay-format base64 blob and return the raw plaintext bytes.
 
-    ``aad`` must match the value passed to :func:`encrypt` (Prompt 097 M-5);
-    a mismatch (e.g. a server that altered the bound metadata) raises
-    ``decryption_failed``.
+    Use this for file mode (the original is binary); :func:`decrypt` is the
+    UTF-8 string wrapper. ``aad`` must match the value passed to
+    :func:`encrypt_bytes` / :func:`encrypt` (Prompt 097 M-5); a mismatch (e.g.
+    a server that altered the bound metadata) raises ``decryption_failed``.
     """
     key_bytes = _decode_key(key)
 
@@ -154,14 +170,22 @@ def decrypt(blob: str, key: str, aad: str | None = None) -> str:
     aesgcm = AESGCM(key_bytes)
     aad_bytes = aad.encode("utf-8") if aad else None
     try:
-        plaintext = aesgcm.decrypt(iv, ciphertext + auth_tag, aad_bytes)
+        return aesgcm.decrypt(iv, ciphertext + auth_tag, aad_bytes)
     except InvalidTag as exc:
         raise ValidPayError(
             "decryption_failed",
             "Decryption failed — wrong key, tampered blob, or altered bound metadata",
         ) from exc
 
-    return plaintext.decode("utf-8")
+
+def decrypt(blob: str, key: str, aad: str | None = None) -> str:
+    """Decrypt a ValidPay-format base64 blob and return the plaintext (UTF-8).
+
+    ``aad`` must match the value passed to :func:`encrypt` (Prompt 097 M-5);
+    a mismatch (e.g. a server that altered the bound metadata) raises
+    ``decryption_failed``.
+    """
+    return decrypt_bytes(blob, key, aad).decode("utf-8")
 
 
 def build_aad(
