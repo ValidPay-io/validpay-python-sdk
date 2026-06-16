@@ -5,6 +5,18 @@ All notable changes to the ValidPay Python SDK will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-06-16
+
+### Added
+
+- **File mode — `create_file_intent()`** (Prompt 099). Seal a full document
+  file (PDF, image, DOCX, …) end-to-end: pass the raw `bytes`, an optional
+  `file_name` and `file_content_type`, and the SDK AES-256-GCM-encrypts the
+  bytes locally (split-key by default) and registers them. A verifier decrypts
+  back the exact original bytes for a byte-for-byte match.
+- Low-level `encrypt_bytes()` / `decrypt_bytes()` helpers for raw-bytes
+  payloads (the existing `encrypt()` / `decrypt()` now delegate to them).
+
 ## [1.1.0] - 2026-06-12
 
 ### Changed

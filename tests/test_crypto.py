@@ -11,12 +11,37 @@ from validpay import (
     combine_key_shares,
     compute_commitment_hash,
     decrypt,
+    decrypt_bytes,
     decrypt_fields,
     encrypt,
+    encrypt_bytes,
     encrypt_fields,
     generate_key,
     split_key,
 )
+
+
+def test_encrypt_bytes_roundtrip_binary():
+    # Non-UTF-8 bytes (a tiny "PDF-ish" header + binary noise) must survive
+    # encrypt_bytes -> decrypt_bytes exactly, byte-for-byte (file mode).
+    key = generate_key()
+    original = b"%PDF-1.7\x00\x01\x02\xff\xfe\r\n binary \x80\x90"
+    blob = encrypt_bytes(original, key)
+    assert decrypt_bytes(blob, key) == original
+
+
+def test_encrypt_bytes_aad_mismatch_fails():
+    key = generate_key()
+    blob = encrypt_bytes(b"\x00\x01\x02", key, aad="a")
+    with pytest.raises(ValidPayError):
+        decrypt_bytes(blob, key, aad="b")
+
+
+def test_encrypt_delegates_to_encrypt_bytes():
+    # The string wrapper must produce a blob decrypt_bytes reads back as UTF-8.
+    key = generate_key()
+    blob = encrypt("héllo ✓", key)
+    assert decrypt_bytes(blob, key).decode("utf-8") == "héllo ✓"
 
 
 def test_generate_key_returns_32_byte_base64():

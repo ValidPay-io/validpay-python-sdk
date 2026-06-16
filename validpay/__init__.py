@@ -19,8 +19,10 @@ from .crypto import (
     combine_key_shares,
     compute_commitment_hash,
     decrypt,
+    decrypt_bytes,
     decrypt_fields,
     encrypt,
+    encrypt_bytes,
     encrypt_fields,
     generate_key,
     split_key,
@@ -36,7 +38,9 @@ __all__ = [
     "VerifyIntentResult",
     "generate_key",
     "encrypt",
+    "encrypt_bytes",
     "decrypt",
+    "decrypt_bytes",
     "compute_commitment_hash",
     "build_aad",
     "split_key",
@@ -51,4 +55,4 @@ __all__ = [
     "OfflineVerifyResult",
 ]
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"

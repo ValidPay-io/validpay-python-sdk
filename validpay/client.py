@@ -17,6 +17,7 @@ from .crypto import (
     decrypt,
     decrypt_fields,
     encrypt,
+    encrypt_bytes,
     encrypt_fields,
     generate_key,
     split_key as split_key_fn,
@@ -163,6 +164,96 @@ class ValidPayClient:
             body=body,
             auth=True,
         )
+
+        retrieval_id = data.get("retrieval_id") if isinstance(data, dict) else None
+        if not retrieval_id:
+            raise ValidPayError(
+                "invalid_response",
+                "API response missing retrieval_id",
+                details=data,
+            )
+
+        return CreateIntentResult(retrieval_id=retrieval_id, key=result_key)
+
+    def create_file_intent(
+        self,
+        document_type: str,
+        file: bytes,
+        *,
+        file_name: Optional[str] = None,
+        file_content_type: Optional[str] = None,
+        valid_from: Optional[str] = None,
+        valid_until: Optional[str] = None,
+        split_key: bool = True,
+    ) -> CreateIntentResult:
+        """Seal a full document file (PDF, image, DOCX, …) end-to-end.
+
+        Unlike :meth:`create_intent`, which JSON-encodes a structured payload,
+        this encrypts the raw ``file`` bytes directly with AES-256-GCM and
+        registers them — so a verifier decrypts back the exact original bytes
+        and can confirm a byte-for-byte match. Split-key protection (Patent C)
+        is on by default, identical to :meth:`create_intent`.
+
+        Args:
+            document_type: Short document-kind string (``"contract"``,
+                ``"wire_instructions"``, ``"title"``, …).
+            file: Raw file bytes to seal. Encrypted locally; never sent in the
+                clear.
+            file_name: Original filename, stored for the issuer's records. It
+                is treated as potentially sensitive and is NOT echoed on the
+                public verify endpoint.
+            file_content_type: MIME type (``"application/pdf"``,
+                ``"image/png"``, …). Returned on verify so downloads get the
+                right type/extension instead of a generic ``.bin``.
+            valid_from: Optional ISO-8601 start of the validity window.
+            valid_until: Optional ISO-8601 end of the validity window.
+            split_key: Default ``True`` (Patent C). ``False`` returns the full
+                AES key in the result instead of Share A.
+
+        Returns:
+            A :class:`CreateIntentResult` with the retrieval id and the key
+            material (Share A by default).
+        """
+        if not document_type:
+            raise ValidPayError("invalid_argument", "document_type is required")
+        if not isinstance(file, (bytes, bytearray)):
+            raise ValidPayError("invalid_argument", "file must be bytes")
+        if len(file) == 0:
+            raise ValidPayError("invalid_argument", "file is empty")
+        _validate_time_lock(valid_from, valid_until)
+
+        full_key = generate_key()
+        share_b: Optional[str] = None
+        result_key = full_key
+        if split_key:
+            result_key, share_b = split_key_fn(full_key)
+
+        # M-5: bind document_type + validity window as AAD, same as create_intent.
+        aad = build_aad(document_type, valid_from, valid_until)
+        encrypted_payload = encrypt_bytes(bytes(file), full_key, aad)
+        # Commitment v2: hash the ciphertext, not the plaintext (C-1).
+        commitment_hash = compute_commitment_hash(encrypted_payload)
+
+        body: Dict[str, Any] = {
+            "document_type": document_type,
+            "encrypted_payload": encrypted_payload,
+            "commitment_hash": commitment_hash,
+            "encryption_version": 2,
+            "file_size_bytes": len(file),
+        }
+        if split_key:
+            body["split_key"] = True
+            body["key_fragment_b"] = share_b
+        if file_name is not None:
+            body["file_name"] = file_name
+        if file_content_type is not None:
+            body["file_content_type"] = file_content_type
+        if valid_from is not None:
+            body["valid_from"] = valid_from
+        if valid_until is not None:
+            body["valid_until"] = valid_until
+
+        data = self._request("POST", "/v1/intent", body=body, auth=True)
 
         retrieval_id = data.get("retrieval_id") if isinstance(data, dict) else None
         if not retrieval_id:
