@@ -29,6 +29,14 @@ from .crypto import (
 )
 from .errors import ValidPayError
 from .offline import OfflineCache, OfflineVerifyResult
+from .pdf import (
+    MIN_RECOMMENDED_QR_PT,
+    QrPlacement,
+    ResolvedQrRect,
+    build_verify_url,
+    embed_qr,
+    resolve_qr_rect,
+)
 from .types import CreateIntentResult, VerifyIntentResult
 
 __all__ = [
@@ -53,6 +61,12 @@ __all__ = [
     "BindingComparisonResult",
     "OfflineCache",
     "OfflineVerifyResult",
+    "QrPlacement",
+    "ResolvedQrRect",
+    "MIN_RECOMMENDED_QR_PT",
+    "build_verify_url",
+    "resolve_qr_rect",
+    "embed_qr",
 ]
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
