@@ -62,6 +62,57 @@ print(verification.issuer_verified) # True
 print(verification.status)          # "active"
 ```
 
+### Placing the QR on a document (`embed_qr`)
+
+To verify a document, a scannable QR encoding the verify URL has to appear **on**
+it. `embed_qr` builds that QR and stamps it onto a PDF for you — no QR library
+wiring, no base64url juggling, and no fighting PDF coordinates (PDFs measure from
+the bottom-left; everything else from the top-left).
+
+It needs the optional PDF extras — the core SDK needs none of them:
+
+```bash
+pip install "validpay[pdf]"
+```
+
+```python
+from validpay import ValidPayClient, QrPlacement, embed_qr
+
+client = ValidPayClient(api_key="vp_live_...")
+
+with open("invoice.pdf", "rb") as f:
+    original = f.read()
+
+res = client.create_file_intent(
+    document_type="invoice", file=original, file_content_type="application/pdf",
+)
+
+sealed = embed_qr(
+    original, res.retrieval_id, res.key,
+    # 90pt (1.25in) QR, 36pt in from the bottom-right corner.
+    QrPlacement(anchor="bottom-right", x=36, y=36, width=90),
+)
+with open("invoice-sealed.pdf", "wb") as f:
+    f.write(sealed)
+```
+
+**The placement contract** — identical to the Node SDK and the developer
+console's "Try it" tool, so a position you pick in the UI maps here 1:1:
+
+| field    | meaning | default |
+| -------- | ------- | ------- |
+| `anchor` | which page **corner** the insets are measured from (`top-left`/`top-right`/`bottom-left`/`bottom-right`) | `top-left` |
+| `x`      | horizontal inset from that corner's vertical edge | — |
+| `y`      | vertical inset from that corner's horizontal edge | — |
+| `width`  | QR side length (it's square) | — |
+| `units`  | `pt` (1/72in) / `mm` / `in` | `pt` |
+| `page`   | 1-based page number | `1` |
+
+Keep the QR **≥ ~72pt (1in)** so it scans once printed — `embed_qr` warns below
+that and raises if the placement runs off the page. Using a different PDF
+library? The pure helpers `build_verify_url(...)` and
+`resolve_qr_rect(placement, page_w_pt, page_h_pt)` have no dependencies.
+
 ### Time-Locked Verification (Patent D)
 
 Restrict when a document can be verified by specifying a validity window:

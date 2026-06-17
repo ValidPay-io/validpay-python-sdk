@@ -5,6 +5,21 @@ All notable changes to the ValidPay Python SDK will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-06-17
+
+### Added
+
+- **QR placement — `embed_qr()`** plus the pure helpers `build_verify_url()`
+  and `resolve_qr_rect()`, and the `QrPlacement` contract (anchor + x/y insets
+  + width + units + page). Stamps a scannable verify QR onto a PDF so
+  integrators stop hand-rolling QR rendering and guessing coordinates; the
+  coordinate vocabulary is identical to the Node SDK and the developer
+  console's "Try it" tool. Warns below the ~72pt scannable minimum and raises
+  on off-page placement.
+- New optional extra: `pip install "validpay[pdf]"` (`qrcode`, `Pillow`,
+  `reportlab`, `pypdf`). The core SDK stays dependency-light — these load only
+  when `embed_qr` is called.
+
 ## [1.3.0] - 2026-06-16
 
 ### Added
