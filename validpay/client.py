@@ -97,6 +97,7 @@ class ValidPayClient:
         valid_from: Optional[str] = None,
         valid_until: Optional[str] = None,
         split_key: bool = True,
+        on_behalf_of: Optional[Dict[str, str]] = None,
     ) -> CreateIntentResult:
         """Encrypt ``payload`` locally and register it with the ValidPay API.
 
@@ -157,6 +158,8 @@ class ValidPayClient:
             body["valid_from"] = valid_from
         if valid_until is not None:
             body["valid_until"] = valid_until
+        if on_behalf_of is not None:
+            body["on_behalf_of"] = on_behalf_of
 
         data = self._request(
             "POST",
@@ -185,6 +188,7 @@ class ValidPayClient:
         valid_from: Optional[str] = None,
         valid_until: Optional[str] = None,
         split_key: bool = True,
+        on_behalf_of: Optional[Dict[str, str]] = None,
     ) -> CreateIntentResult:
         """Seal a full document file (PDF, image, DOCX, …) end-to-end.
 
@@ -252,6 +256,8 @@ class ValidPayClient:
             body["valid_from"] = valid_from
         if valid_until is not None:
             body["valid_until"] = valid_until
+        if on_behalf_of is not None:
+            body["on_behalf_of"] = on_behalf_of
 
         data = self._request("POST", "/v1/intent", body=body, auth=True)
 
@@ -329,6 +335,9 @@ class ValidPayClient:
                 req_item["valid_from"] = valid_from
             if valid_until is not None:
                 req_item["valid_until"] = valid_until
+            on_behalf_of = item.get("on_behalf_of")
+            if on_behalf_of is not None:
+                req_item["on_behalf_of"] = on_behalf_of
             request_items.append(req_item)
 
         data = self._request(
@@ -478,6 +487,8 @@ class ValidPayClient:
             registered_at=data.get("registered_at", ""),
             status=data.get("status", ""),
             integrity_verified=integrity_verified,
+            verification_level=data.get("verification_level"),
+            delegated_by=data.get("delegated_by"),
             valid_from=valid_from_str,
             valid_until=valid_until_str,
             time_lock_status=time_lock_status,
@@ -589,6 +600,8 @@ class ValidPayClient:
             registered_at=data.get("registered_at", ""),
             status=data.get("status", ""),
             integrity_verified=integrity_verified,
+            verification_level=data.get("verification_level"),
+            delegated_by=data.get("delegated_by"),
             valid_from=valid_from_str,
             valid_until=valid_until_str,
             time_lock_status=time_lock_status,
@@ -603,6 +616,7 @@ class ValidPayClient:
         split_key: bool = False,
         valid_from: Optional[str] = None,
         valid_until: Optional[str] = None,
+        on_behalf_of: Optional[Dict[str, str]] = None,
     ) -> CreateIntentResult:
         """Create an intent with per-field encryption and a disclosure policy (Patent E).
 
@@ -677,6 +691,8 @@ class ValidPayClient:
             body["valid_from"] = valid_from
         if valid_until is not None:
             body["valid_until"] = valid_until
+        if on_behalf_of is not None:
+            body["on_behalf_of"] = on_behalf_of
 
         data = self._request("POST", "/v1/intent", body=body, auth=True)
 
@@ -817,6 +833,8 @@ class ValidPayClient:
             registered_at=data.get("registered_at", ""),
             status=data.get("status", ""),
             integrity_verified=integrity_verified,
+            verification_level=data.get("verification_level"),
+            delegated_by=data.get("delegated_by"),
             valid_from=valid_from_str,
             valid_until=valid_until_str,
             time_lock_status=time_lock_status,

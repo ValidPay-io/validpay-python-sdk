@@ -54,3 +54,9 @@ class VerifyIntentResult:
     valid_from: Optional[str] = None
     valid_until: Optional[str] = None
     time_lock_status: Optional[str] = None
+    # Platform delegation (Fork B). ``verification_level`` is the issuer's graded
+    # trust rung: "none" < "delegated" < "domain" < "business". ``delegated_by``
+    # is set when this was sealed on behalf of, via a platform — a dict
+    # ``{"platform": str, "platform_level": "domain"|"business"}`` — else None.
+    verification_level: Optional[str] = None
+    delegated_by: Optional[dict] = None

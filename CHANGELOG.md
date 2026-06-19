@@ -5,6 +5,24 @@ All notable changes to the ValidPay Python SDK will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-06-19
+
+### Added
+
+- **Platform delegation — `on_behalf_of`** (Fork B). Platforms that seal on
+  behalf of the businesses they serve can declare which business each seal is
+  for: pass `on_behalf_of={"ref": ..., "name": ...}` to `create_intent`,
+  `create_file_intent`, `create_selective_intent`, or per-item in
+  `create_intent_batch`. `ref` is your own id for the business (the dedupe key —
+  same `ref` rolls up); `name` is who the verifier sees. The verifier sees that
+  business as the issuer, attributed *through* your platform, at the `delegated`
+  trust rung. ValidPay stays blind to the document contents — identity only.
+- `verify_intent` now surfaces `verification_level` (`none` < `delegated` <
+  `domain` < `business`) and `delegated_by` (`{"platform", "platform_level"}` or
+  `None`) on `VerifyIntentResult`.
+
+> Requires the ValidPay API with platform-delegation support (live 2026-06-19).
+
 ## [1.4.0] - 2026-06-17
 
 ### Added
