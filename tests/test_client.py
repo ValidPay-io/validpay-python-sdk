@@ -104,6 +104,46 @@ def test_create_intent_encrypts_locally_and_never_sends_key():
     assert decrypted == payload
 
 
+def test_create_intent_sends_on_behalf_of_for_delegation():
+    session = _FakeSession([
+        _FakeResponse(201, {"retrieval_id": "vp_d", "status": "active"}),
+    ])
+    client = ValidPayClient(
+        api_key="test_key", base_url="https://api.example.test", session=session
+    )
+    client.create_intent(
+        document_type="lease",
+        payload={"a": 1},
+        on_behalf_of={"ref": "cust_42", "name": "Smith Properties"},
+    )
+    sent_body = json.loads(session.calls[0]["data"])
+    assert sent_body["on_behalf_of"] == {"ref": "cust_42", "name": "Smith Properties"}
+
+
+def test_verify_surfaces_verification_level_and_delegated_by():
+    key = generate_key()
+    blob = encrypt(json.dumps({"a": 1}), key)
+    session = _FakeSession([
+        _FakeResponse(200, {
+            "intent_id": "vp_d",
+            "encrypted_payload": blob,
+            "issuer": "Smith Properties",
+            "issuer_verified": False,
+            "registered_at": "2026-04-29T12:00:00.000Z",
+            "status": "active",
+            "document_type": "lease",
+            "verification_level": "delegated",
+            "delegated_by": {"platform": "Acme Platform", "platform_level": "domain"},
+        }),
+    ])
+    client = ValidPayClient(
+        api_key="test_key", base_url="https://api.example.test", session=session
+    )
+    result = client.verify_intent("vp_d", key)
+    assert result.verification_level == "delegated"
+    assert result.delegated_by == {"platform": "Acme Platform", "platform_level": "domain"}
+
+
 def test_create_intent_split_key_false_is_legacy_full_key():
     """split_key=False preserves the 1.0.x behavior: no fragment fields,
     and the returned key decrypts the payload directly."""

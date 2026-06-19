@@ -172,6 +172,34 @@ print(verified.payload)
   response, so it verifies both; `verify_split_key_intent()` also still
   works.
 
+### Platform delegation — `on_behalf_of`
+
+If you integrate as a **platform** and seal on behalf of the businesses you
+serve, name the business on each seal. The verifier sees that business as the
+issuer ("who"), attributed *through* your platform ("through whom"), at the
+`delegated` trust rung. Those businesses never touch ValidPay — no account, no
+login — and ValidPay stays blind to the document contents.
+
+```python
+result = client.create_intent(
+    document_type="lease",
+    payload={"unit": "4B", "term": "12mo"},
+    on_behalf_of={
+        "ref": "landlord_8675309",       # YOUR id for this business (dedupe key)
+        "name": "Smith Properties LLC",  # who the verifier sees
+    },
+)
+
+verified = client.verify_intent(result.retrieval_id, result.key)
+verified.issuer              # "Smith Properties LLC"
+verified.verification_level  # "delegated"
+verified.delegated_by        # {"platform": "Your Platform", "platform_level": "domain"}
+```
+
+Same `ref` ⇒ same tracked business (its documents and verification counts roll
+up). A sub-issuer surfaces as `delegated` only once **your** platform account is
+domain-verified; until then its documents show as unverified.
+
 ### Selective disclosure (Patent E)
 
 Each field is encrypted with its own per-field key. A disclosure policy maps
