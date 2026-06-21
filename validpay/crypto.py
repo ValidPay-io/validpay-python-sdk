@@ -75,6 +75,42 @@ def combine_key_shares(share_a: str, share_b: str) -> str:
     return base64.b64encode(key_bytes).decode("ascii")
 
 
+def split_key_pieces(key: str, piece_count: int) -> list[str]:
+    """Split an AES-256 key for End-Cell (n-of-n XOR): ``[share_a, piece_1, …]``.
+
+    ``share_a`` is the QR key; the pieces go to the server-side holders. The key
+    is recovered as ``share_a XOR piece_1 XOR … XOR piece_n``. Byte-identical to the
+    other ValidPay SDKs and the verifier so a sealed intent reconstructs anywhere.
+    """
+    if piece_count < 1:
+        raise ValidPayError("invalid_argument", "piece_count must be >= 1")
+    key_bytes = _decode_key(key)
+    share_a = os.urandom(_KEY_BYTES)
+    remainder = bytearray(a ^ b for a, b in zip(key_bytes, share_a))  # = K ⊕ ShareA
+    pieces: list[bytes] = []
+    for _ in range(piece_count - 1):
+        piece = os.urandom(_KEY_BYTES)
+        for i in range(_KEY_BYTES):
+            remainder[i] ^= piece[i]
+        pieces.append(piece)
+    pieces.append(bytes(remainder))  # last piece absorbs the remainder
+    return [base64.b64encode(share_a).decode("ascii")] + [
+        base64.b64encode(p).decode("ascii") for p in pieces
+    ]
+
+
+def combine_key_pieces(share_a: str, pieces: list[str]) -> str:
+    """Reconstruct an AES-256 key from ShareA + every server-side piece (XOR)."""
+    if not pieces:
+        raise ValidPayError("invalid_argument", "need at least one piece")
+    combined = bytearray(_decode_key(share_a))
+    for piece_b64 in pieces:
+        piece = _decode_key(piece_b64)
+        for i in range(_KEY_BYTES):
+            combined[i] ^= piece[i]
+    return base64.b64encode(bytes(combined)).decode("ascii")
+
+
 def compute_commitment_hash(ciphertext_b64: str) -> str:
     """SHA-256 commitment hash over the *ciphertext* blob (commitment v2).
 
