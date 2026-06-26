@@ -80,7 +80,7 @@ def _to_base64url(b64: str) -> str:
 def build_verify_url(
     retrieval_id: str,
     key: str,
-    base_url: str = "https://validpay.com",
+    base_url: str = "https://verify.keyhalve.com",
 ) -> str:
     """Build the canonical verify URL the QR encodes::
 
@@ -139,7 +139,7 @@ def embed_qr(
     key: str,
     placement: QrPlacement,
     *,
-    base_url: str = "https://validpay.com",
+    base_url: str = "https://verify.keyhalve.com",
     error_correction: str = "M",
     margin: int = 2,
     dark_color: str = "#0A0F1E",
