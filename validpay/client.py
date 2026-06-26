@@ -21,9 +21,18 @@ from .crypto import (
     encrypt_fields,
     generate_key,
     split_key as split_key_fn,
+    split_key_pieces,
+    combine_key_pieces,
 )
 from .errors import ValidPayError
+from .rail import (
+    fetch_rail_piece,
+    KEYHALVE_RAIL_BASE_URL,
+    KEYHALVE_RAIL_PUBLIC_KEY_SPKI_B64,
+)
 from .types import CreateIntentResult, VerifyIntentResult
+
+_HOLDER_KEYHALVE = "keyhalve"
 
 DEFAULT_BASE_URL = "https://api.validpay.com"
 DEFAULT_TIMEOUT = 30.0
@@ -81,6 +90,8 @@ class ValidPayClient:
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = DEFAULT_TIMEOUT,
         session: Optional[requests.Session] = None,
+        rail_base_url: str = KEYHALVE_RAIL_BASE_URL,
+        rail_public_key_spki: str = KEYHALVE_RAIL_PUBLIC_KEY_SPKI_B64,
     ) -> None:
         if not api_key:
             raise ValidPayError("invalid_config", "api_key is required")
@@ -88,6 +99,8 @@ class ValidPayClient:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         self._session = session if session is not None else requests.Session()
+        self._rail_base_url = rail_base_url
+        self._rail_public_key_spki = rail_public_key_spki
 
     def create_intent(
         self,
@@ -177,6 +190,62 @@ class ValidPayClient:
             )
 
         return CreateIntentResult(retrieval_id=retrieval_id, key=result_key)
+
+    def create_end_cell_intent(
+        self,
+        document_type: str,
+        payload: Any,
+        *,
+        holders: Optional[List[str]] = None,
+        valid_from: Optional[str] = None,
+        valid_until: Optional[str] = None,
+        on_behalf_of: Optional[Dict[str, str]] = None,
+    ) -> CreateIntentResult:
+        """Seal a document with End-Cell (CVCP Layer 6B): an n-of-n XOR split across
+        ShareA (returned as ``key``, embed in the QR) + one mandatory piece per holder
+        (default: the KeyHalve rail + the platform). No single party can read or
+        assemble the key. Requires API End-Cell issuance to be enabled.
+        """
+        if not document_type:
+            raise ValidPayError("invalid_argument", "document_type is required")
+        _validate_time_lock(valid_from, valid_until)
+
+        holders = holders or ["keyhalve", "platform"]
+        if len(set(holders)) != len(holders):
+            raise ValidPayError("invalid_argument", "holders must be unique")
+        if holders.count(_HOLDER_KEYHALVE) != 1 or not any(h != _HOLDER_KEYHALVE for h in holders):
+            raise ValidPayError(
+                "invalid_argument",
+                'end_cell requires exactly one "keyhalve" rail share and >= 1 platform share',
+            )
+
+        full_key = generate_key()
+        parts = split_key_pieces(full_key, len(holders))  # [share_a, piece_1, ...]
+        share_a = parts[0]
+        pieces = [{"holder": h, "piece": parts[i + 1]} for i, h in enumerate(holders)]
+
+        aad = build_aad(document_type, valid_from, valid_until)
+        encrypted_payload = encrypt(json.dumps(payload), full_key, aad)
+        body: Dict[str, Any] = {
+            "document_type": document_type,
+            "encrypted_payload": encrypted_payload,
+            "commitment_hash": compute_commitment_hash(encrypted_payload),
+            "encryption_version": 2,
+            "end_cell": True,
+            "pieces": pieces,
+        }
+        if valid_from is not None:
+            body["valid_from"] = valid_from
+        if valid_until is not None:
+            body["valid_until"] = valid_until
+        if on_behalf_of is not None:
+            body["on_behalf_of"] = on_behalf_of
+
+        data = self._request("POST", "/v1/intent", body=body, auth=True)
+        retrieval_id = data.get("retrieval_id") if isinstance(data, dict) else None
+        if not retrieval_id:
+            raise ValidPayError("invalid_response", "API response missing retrieval_id", details=data)
+        return CreateIntentResult(retrieval_id=retrieval_id, key=share_a)
 
     def create_file_intent(
         self,
@@ -393,6 +462,31 @@ class ValidPayClient:
             )
         return share_b
 
+    def _fetch_pieces(self, retrieval_id: str) -> List[str]:
+        """Fetch the End-Cell PLATFORM share(s) from the API /fragment endpoint.
+
+        The rail share is NOT here — it is fetched separately from the KeyHalve rail.
+        """
+        data = self._request(
+            "GET",
+            f"/v1/intent/{quote(retrieval_id, safe='')}/fragment",
+            auth=False,
+        )
+        if isinstance(data, dict) and data.get("error"):
+            raise ValidPayError(
+                str(data.get("error")),
+                f"Fragment retrieval failed: {data.get('error')}",
+                details=data,
+            )
+        pieces = data.get("pieces") if isinstance(data, dict) else None
+        if not isinstance(pieces, dict) or not pieces:
+            raise ValidPayError("missing_fragment", "Server did not return End-Cell pieces", details=data)
+        order = data.get("holders") or list(pieces.keys())
+        result = [pieces[h] for h in order if pieces.get(h)]
+        if len(result) != len(order):
+            raise ValidPayError("missing_fragment", "An End-Cell piece was missing", details=data)
+        return result
+
     def verify_intent(
         self,
         retrieval_id: str,
@@ -455,7 +549,20 @@ class ValidPayClient:
         # default issue path, so the key the caller holds is Share A —
         # fetch Share B from the fragment endpoint and XOR-combine, so
         # create_intent -> verify_intent round-trips keep working.
-        if data.get("split_key"):
+        if data.get("end_cell"):
+            # Custody separation: platform share(s) from the API + the rail share from
+            # the independent KeyHalve rail (signature-verified vs the pinned key),
+            # XOR-combined with ShareA. Fails closed if either is missing.
+            platform_pieces = self._fetch_pieces(retrieval_id)
+            rail_piece = fetch_rail_piece(
+                self._session,
+                self._rail_base_url,
+                self._rail_public_key_spki,
+                retrieval_id,
+                self._timeout,
+            )
+            key = combine_key_pieces(key, [*platform_pieces, rail_piece])
+        elif data.get("split_key"):
             key = combine_key_shares(key, self._fetch_fragment_b(retrieval_id))
 
         # Commitment check over the ciphertext (C-1) — proves the server

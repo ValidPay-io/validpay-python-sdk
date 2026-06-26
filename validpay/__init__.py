@@ -26,6 +26,8 @@ from .crypto import (
     encrypt_fields,
     generate_key,
     split_key,
+    split_key_pieces,
+    combine_key_pieces,
 )
 from .errors import ValidPayError
 from .offline import OfflineCache, OfflineVerifyResult
@@ -53,6 +55,8 @@ __all__ = [
     "build_aad",
     "split_key",
     "combine_key_shares",
+    "split_key_pieces",
+    "combine_key_pieces",
     "encrypt_fields",
     "build_key_map",
     "decrypt_fields",

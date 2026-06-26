@@ -27,7 +27,7 @@ from pyzbar.pyzbar import decode as zbar_decode
 # --- constants ---------------------------------------------------------------
 
 ENCODED_DATA = (
-    "https://validpay.com/verify/vp_abc123def456"
+    "https://verify.keyhalve.com/verify/vp_abc123def456"
     "#k=dGVzdGtleV9iYXNlNjRfZW5jb2RlZF8zMl9ieXRlcw"
 )
 

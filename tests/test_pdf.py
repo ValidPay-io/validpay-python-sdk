@@ -24,14 +24,14 @@ pdf_only = pytest.mark.skipif(not _HAS_PDF, reason="validpay[pdf] extras not ins
 
 def test_build_verify_url_basic():
     assert build_verify_url("abc123", "deadbeef") == (
-        "https://validpay.com/verify/abc123#key=deadbeef"
+        "https://verify.keyhalve.com/verify/abc123#key=deadbeef"
     )
 
 
 def test_build_verify_url_base64url_key_and_encoded_id():
     # "K+K/m==" -> base64url "K-K_m"; id is percent-encoded.
     assert build_verify_url("a/b c", "K+K/m==") == (
-        "https://validpay.com/verify/a%2Fb%20c#key=K-K_m"
+        "https://verify.keyhalve.com/verify/a%2Fb%20c#key=K-K_m"
     )
 
 
