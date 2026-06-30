@@ -31,17 +31,17 @@ from validpay import ValidPayClient
 
 client = ValidPayClient(api_key="vp_live_xxx")
 
-# Create a single intent — the payload is encrypted locally before
-# anything leaves your process. Only the ciphertext is sent to ValidPay.
-# Split-key protection (Patent C) is the default since 1.1.0: result.key
-# is Share A of the AES key; Share B lives on the ValidPay server. The
-# full decryption key never exists on any single system.
-result = client.create_intent(
+# Seal with End-Cell (recommended). The payload is encrypted locally; the AES
+# key is split THREE ways: result.key is ShareA (rides the QR), one share goes
+# to the platform, one to the independent KeyHalve rail. No single party — not
+# the platform, not KeyHalve — can read or reassemble the key.
+result = client.create_end_cell_intent(
     document_type="check",
     payload={"payee": "John Doe", "amount": 1500.00, "check_number": "10042"},
+    # holders defaults to ["keyhalve", "platform"] -> a 3-of-3 split with ShareA
 )
 print(result.retrieval_id)  # vp_abc123def456
-print(result.key)           # base64 key Share A — embed in the QR / deliver out-of-band
+print(result.key)           # ShareA — embed in the QR / deliver out-of-band
 
 # Create up to 100 intents in one round trip.
 results = client.create_intent_batch([
@@ -61,6 +61,12 @@ print(verification.issuer)          # "Acme Corp"
 print(verification.issuer_verified) # True
 print(verification.status)          # "active"
 ```
+
+> **Simpler 2-share option:** `create_split_key_intent()` splits the key between
+> the document and the platform only — no independent rail share, so the platform
+> alone could reconstruct. `create_intent()` also defaults to split-key. Prefer
+> **End-Cell** above when independence from the platform matters. `verify_intent()`
+> handles all share models automatically.
 
 ### Placing the QR on a document (`embed_qr`)
 
@@ -244,15 +250,26 @@ for event in history:
 - `session` — optionally provide a `requests.Session` for connection
   pooling, custom adapters, or mocking in tests.
 
+### `client.create_end_cell_intent(document_type, payload, *, holders=None, valid_from=None, valid_until=None, on_behalf_of=None) -> CreateIntentResult` — recommended
+
+KeyHalve's blind-rail flow. Encrypts `payload` and XOR-splits the AES key into
+**ShareA** (returned as `key`, for the QR) plus one share per holder. `holders`
+defaults to `["keyhalve", "platform"]` → a **3-of-3** split: the independent
+KeyHalve rail share + the platform share + ShareA. No single party can read or
+reassemble the key. Verify with `verify_intent`, which fetches the platform +
+rail shares, verifies the rail's Ed25519 signature against a **pinned** key
+(fail-closed), recombines in memory, and decrypts. **The full key never exists
+on any single system.** Requires the API deployment to have End-Cell enabled.
+
 ### `client.create_intent(document_type, payload, *, split_key=True) -> CreateIntentResult`
 
 Encrypts `payload` (any JSON-serializable value) under a freshly
-generated AES-256 key and registers it with ValidPay. Returns the
-retrieval id and the key material: **Share A** of the split key by
-default (Share B goes to the server; neither alone decrypts), or the
-full AES key with `split_key=False`. **The full key is never sent to
-ValidPay** — hand the returned key off out-of-band to whoever needs to
-verify the intent.
+generated AES-256 key and registers it. Defaults to **split-key** (2-share):
+the returned `key` is **Share A** and Share B goes to the platform — neither
+alone decrypts, but there is **no independent rail share** (the platform alone
+could reconstruct). For independence from the platform, prefer
+**`create_end_cell_intent`** above. `split_key=False` gives the legacy
+single-key flow. **The full key is never sent to ValidPay.**
 
 ### `client.create_intent_batch(intents) -> list[CreateIntentResult]`
 
